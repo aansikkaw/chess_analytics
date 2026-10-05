@@ -55,12 +55,12 @@ async function loadHealth() {
     const box = $("#health");
     box.replaceChildren(
       el("span", {}, "Engine ", el("b", { class: h.engine ? "ok" : "no", text: h.engine ? "ready" : "missing" })),
-      el("span", {}, "Coach ", el("b", { text: h.coach_mode === "agent" ? "AI agent" : "offline mode" })),
+      el("span", {}, "Coach ", el("b", { text: h.coach_mode === "agent" ? h.coach_model : "offline mode" })),
     );
     if (!h.engine) showImportError(h.engine_error || "Stockfish isn't available.");
     $("#coachMode").textContent = h.coach_mode === "agent"
-      ? "AI coach: answers are built from tool calls on your data and checked with Stockfish."
-      : "Offline coach: rule-based answers. Set ANTHROPIC_API_KEY on the server to switch on the AI agent.";
+      ? `AI coach (${h.coach_model}): answers come from your analysed games, and moves are checked with Stockfish.`
+      : "Offline coach: rule-based answers. Start Ollama or set an API key to switch on the AI coach (see README).";
   } catch (e) { showImportError(e.message); }
 }
 
@@ -308,7 +308,7 @@ $("#suggest").replaceChildren(...SKILL_SUGGEST.map((q) => {
 async function ask(q) {
   if (!user || !q.trim()) return;
   addMsg("u", q);
-  const thinking = addMsg("a", "Looking through your games…", "thinking");
+  const thinking = addMsg("a", "Looking through your games… (a local model can take up to a minute)", "thinking");
   try {
     const r = await api(`/api/players/${encodeURIComponent(user)}/coach`, {
       method: "POST", body: JSON.stringify({ message: q, history: chatHistory }),

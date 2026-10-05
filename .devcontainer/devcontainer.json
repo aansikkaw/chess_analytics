@@ -5,13 +5,25 @@
   "containerEnv": {
     "STOCKFISH_PATH": "/usr/games/stockfish"
   },
-  "forwardPorts": [8000],
+  "forwardPorts": [
+    8000
+  ],
   "portsAttributes": {
-    "8000": { "label": "Plateau Breaker", "onAutoForward": "openBrowser" }
+    "8000": {
+      "label": "Plateau Breaker",
+      "onAutoForward": "openBrowser"
+    }
   },
   "customizations": {
     "vscode": {
-      "extensions": ["ms-python.python", "charliermarsh.ruff"]
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff"
+      ]
     }
+  },
+  "postStartCommand": "bash scripts/start_ollama.sh || true",
+  "hostRequirements": {
+    "memory": "8gb"
   }
 }

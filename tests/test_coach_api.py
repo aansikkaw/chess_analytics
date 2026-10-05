@@ -3,7 +3,13 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app.coach import Coach, CoachTools, OfflineCoach, ToolError, clean_history
+import json
+
+import httpx
+
+from app.coach import Coach, CoachReply, CoachTools, OfflineCoach, ToolError, clean_history
+from app.config import load_settings
+from app.llm import Backend, parse_tool_args, resolve_backend
 from tests.conftest import needs_engine
 
 
@@ -60,7 +66,7 @@ def test_agent_loop_runs_tools_and_returns_text():
         SimpleNamespace(stop_reason="end_turn", content=[_block(type="text", text="Work on endgames.")]),
     ]
     tools = FakeTools()
-    coach = Coach("alice", tools, api_key=None, model="m")
+    coach = Coach("alice", tools, Backend("anthropic", "m", api_key="x"))
     fake = FakeMessages(script)
     coach._client = SimpleNamespace(messages=fake)
 
@@ -76,13 +82,13 @@ def test_agent_loop_runs_tools_and_returns_text():
 
 def test_agent_loop_stops_after_max_steps():
     loop = SimpleNamespace(stop_reason="tool_use", content=[_block(type="tool_use", id="t", name="get_insights", input={})])
-    coach = Coach("alice", FakeTools(), api_key=None, model="m")
+    coach = Coach("alice", FakeTools(), Backend("anthropic", "m", api_key="x"))
     coach._client = SimpleNamespace(messages=FakeMessages([loop] * 10))
     assert "narrower question" in coach.chat("dig forever").reply
 
 
 def test_empty_message():
-    assert Coach("alice", FakeTools(), None, "m").chat("   ").reply.startswith("Ask me")
+    assert Coach("alice", FakeTools(), None).chat("   ").reply.startswith("Ask me")
 
 
 # ---- API end to end (demo import, puzzles, coach) --------------------------------
@@ -159,3 +165,80 @@ def test_offline_coach_routes_intents(client):
     low = [s for s in tools.dna["skills"] if s["low_confidence"]]
     if low:
         assert "too few moves" in oc._skill(low[0]["key"])
+
+
+# ---- OpenAI-compatible providers (Ollama, Groq, Gemini...) via a mock HTTP server ----
+class BriefTools(FakeTools):
+    """FakeTools plus what context_brief needs."""
+
+    dna = {"base_rating": 1800, "overall_accuracy": 88.0, "games": 3,
+           "skills": [{"label": "Endgames", "rating": 1700, "low_confidence": False}]}
+
+    def get_insights(self):
+        return [{"stat": "2x", "text": "more blunders in time trouble."}]
+
+    def list_critical_moments(self, limit=3):
+        return [{"opponent": "bob", "move": "12.", "you_played": "Nd5", "eval_before": "+0.5", "eval_after": "-1.2",
+                 "engine_best": "Be2", "engine_line": ["Be2", "O-O"], "patterns": ["missed_tactic"]}]
+
+
+def _mock_http(replies, seen):
+    def handler(request: httpx.Request):
+        body = json.loads(request.content)
+        seen.append(body)
+        status, payload = replies.pop(0)
+        return httpx.Response(status, json=payload)
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_openai_compatible_agent_calls_tools_then_answers():
+    seen = []
+    replies = [
+        (200, {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "get_rating_dna", "arguments": "{}"}}]}}]}),
+        (200, {"choices": [{"message": {"role": "assistant", "content": "Drill rook endings."}}]}),
+    ]
+    tools = BriefTools()
+    coach = Coach("alice", tools, Backend("ollama", "qwen2.5:3b", "http://localhost:11434/v1", "ollama"), http=_mock_http(replies, seen))
+    r = coach.chat("what should I study?")
+    assert r.reply == "Drill rook endings." and r.mode == "agent" and r.tools_used == ["get_rating_dna"]
+    assert tools.ran == [("get_rating_dna", {})]
+    first = seen[0]
+    assert first["model"] == "qwen2.5:3b" and first["tools"][0]["type"] == "function"
+    assert "Verified data about this player" in first["messages"][0]["content"]  # context brief for small models
+    assert "Nd5" in first["messages"][0]["content"]
+    assert seen[1]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'}
+
+
+def test_provider_failure_falls_back_to_offline_coach(monkeypatch):
+    seen = []
+    coach = Coach("alice", BriefTools(), Backend("ollama", "missing-model", "http://x/v1", "ollama"),
+                  http=_mock_http([(404, {"error": "model not found"})], seen))
+    monkeypatch.setattr("app.coach.OfflineCoach.answer", lambda self, m: CoachReply("offline answer", "offline"))
+    r = coach.chat("hi")
+    assert r.mode == "fallback"
+    assert "ollama pull missing-model" in r.reply and r.reply.endswith("offline answer")
+
+
+def test_parse_tool_args_handles_strings_objects_and_junk():
+    assert parse_tool_args('{"limit": 3}') == {"limit": 3}
+    assert parse_tool_args({"limit": 3}) == {"limit": 3}
+    assert parse_tool_args("not json") == {} and parse_tool_args(None) == {}
+
+
+def test_resolve_backend_priority(monkeypatch):
+    monkeypatch.setattr("app.llm.ollama_running", lambda host: True)
+    for k in ("ANTHROPIC_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "COACH_PROVIDER"):
+        monkeypatch.delenv(k, raising=False)
+    assert resolve_backend(load_settings()).kind == "ollama"
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.groq.com/openai/v1/")
+    monkeypatch.setenv("LLM_MODEL", "some-model")
+    b = resolve_backend(load_settings())
+    assert b.kind == "openai" and b.base_url == "https://api.groq.com/openai/v1"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert resolve_backend(load_settings()).kind == "anthropic"
+    monkeypatch.setenv("COACH_PROVIDER", "offline")
+    assert resolve_backend(load_settings()) is None
+    monkeypatch.setattr("app.llm.ollama_running", lambda host: False)
+    monkeypatch.setenv("COACH_PROVIDER", "ollama")
+    assert resolve_backend(load_settings()) is None

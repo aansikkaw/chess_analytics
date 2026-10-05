@@ -20,6 +20,7 @@ from .analysis import analyse_games, win_percent
 from .coach import Coach, CoachTools
 from .config import PROJECT_ROOT, load_settings
 from .engine import Engine, EngineUnavailable
+from .llm import resolve_backend
 from .games import GameImportError, fetch_lichess_pgn, parse_pgn, validate_username
 from .profile import insights, rating_dna, weekly_plan
 from .store import Store
@@ -223,12 +224,9 @@ def attempt(puzzle_id: int, req: AttemptRequest) -> dict:
 def coach(username: str, req: ChatRequest) -> dict:
     games = _games_or_404(username)
     tools = CoachTools(games, state["engine"], store.count_due(username))
-    bot = Coach(username, tools, settings.anthropic_api_key, settings.coach_model)
-    try:
-        r = bot.chat(req.message, req.history)
-    except Exception as exc:  # noqa: BLE001 - API/network errors shouldn't 500 the chat
-        raise HTTPException(502, f"The coach couldn't answer: {exc}") from exc
-    return {"reply": r.reply, "mode": r.mode, "tools_used": r.tools_used}
+    backend = resolve_backend(settings)
+    r = Coach(username, tools, backend).chat(req.message, req.history)  # never raises: falls back to offline
+    return {"reply": r.reply, "mode": r.mode, "tools_used": r.tools_used, "model": backend.label if backend else None}
 
 
 @app.get("/api/health")
@@ -236,7 +234,8 @@ def health() -> dict:
     return {
         "engine": state["engine"] is not None,
         "engine_error": state["engine_error"],
-        "coach_mode": "agent" if settings.anthropic_api_key else "offline",
+        "coach_mode": "agent" if (backend := resolve_backend(settings)) else "offline",
+        "coach_model": backend.label if backend else None,
         "demo_available": DEMO_PGN.exists(),
     }
 

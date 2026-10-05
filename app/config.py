@@ -34,7 +34,13 @@ class Settings:
     max_games: int
     db_path: str
     anthropic_api_key: str | None
-    coach_model: str
+    coach_model: str  # Claude model, used when the provider is "anthropic"
+    coach_provider: str  # auto | anthropic | openai | ollama | offline
+    llm_base_url: str | None  # any OpenAI-compatible /v1 endpoint (Groq, Gemini, OpenRouter, ...)
+    llm_api_key: str | None
+    llm_model: str | None
+    ollama_host: str
+    ollama_model: str
 
 
 def load_settings() -> Settings:
@@ -46,4 +52,10 @@ def load_settings() -> Settings:
         db_path=os.getenv("DB_PATH", str(PROJECT_ROOT / "plateau.db")),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         coach_model=os.getenv("COACH_MODEL", "claude-sonnet-5-5"),
+        coach_provider=os.getenv("COACH_PROVIDER", "auto").strip().lower(),
+        llm_base_url=(os.getenv("LLM_BASE_URL") or "").rstrip("/") or None,
+        llm_api_key=os.getenv("LLM_API_KEY") or None,
+        llm_model=os.getenv("LLM_MODEL") or None,
+        ollama_host=os.getenv("OLLAMA_HOST_URL", "http://localhost:11434").rstrip("/"),
+        ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:3b"),
     )

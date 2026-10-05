@@ -18,13 +18,16 @@ from typing import Any
 
 import chess
 import chess.engine
+import httpx
 
 from .analysis import GameAnalysis, MoveAnalysis, win_percent
 from .engine import Engine
+from .llm import Backend, LLMError, openai_chat, openai_tool_specs, parse_tool_args
 from .profile import SKILLS, insights, rating_dna, weekly_plan
 
 MAX_AGENT_STEPS = 6
 MAX_HISTORY_TURNS = 10
+OPENAI_TIMEOUT = httpx.Timeout(300.0, connect=10.0)  # local CPU models can be slow
 DEEP_LIMIT = chess.engine.Limit(depth=18, time=0.6)
 
 
@@ -207,7 +210,7 @@ Rules:
 @dataclass
 class CoachReply:
     reply: str
-    mode: str  # "agent" or "offline"
+    mode: str  # "agent", "offline", or "fallback" (LLM failed, offline answer given)
     tools_used: list[str] = field(default_factory=list)
 
 
@@ -229,32 +232,82 @@ def clean_history(history: list[dict] | None) -> list[dict]:
     return out
 
 
+def context_brief(tools: CoachTools) -> str:
+    """Verified facts handed to smaller open models up front.
+
+    Small local models are unreliable at deciding to call tools, so we give them
+    the essentials directly. Tools stay available for anything deeper.
+    """
+    d = tools.dna
+    skills = ", ".join(
+        f"{s['label']} {s['rating']}" + (" (few moves, low confidence)" if s["low_confidence"] else "") for s in d["skills"]
+    )
+    insights_ = "\n".join(f"- {i['stat']} {i['text']}" for i in tools.get_insights()[:4]) or "- none yet"
+    moments = "\n".join(
+        f"- vs {m['opponent']}, move {m['move']} {m['you_played']}: eval {m['eval_before']} -> {m['eval_after']}; "
+        f"engine preferred {m['engine_best']} (line: {' '.join(m['engine_line'][:4])}); patterns: {', '.join(m['patterns']) or 'none'}"
+        for m in tools.list_critical_moments(limit=3)
+    ) or "- none"
+    return (
+        "\n\nVerified data about this player (from Stockfish analysis of their games):\n"
+        f"Overall: {d['base_rating']} rating, {d['overall_accuracy']}% accuracy over {d['games']} games.\n"
+        f"Skill ratings: {skills}.\nKey findings:\n{insights_}\nCostliest moments:\n{moments}\n"
+        "Use only these facts or tool results. You may call tools for more detail."
+    )
+
+
 class Coach:
-    def __init__(self, username: str, tools: CoachTools, api_key: str | None, model: str):
+    """Routes a chat message to the configured LLM backend, or the offline coach.
+
+    If the LLM fails (network, rate limit, missing model), the user still gets an
+    answer from the offline coach plus a one-line note saying why.
+    """
+
+    def __init__(self, username: str, tools: CoachTools, backend: Backend | None, http: httpx.Client | None = None):
         self.username = username
         self.tools = tools
-        self.model = model
-        self._client = None
-        if api_key:
-            import anthropic  # imported lazily so the offline mode needs no SDK
-
-            self._client = anthropic.Anthropic(api_key=api_key)
+        self.backend = backend
+        self._http = http
+        self._client = None  # Anthropic SDK client, created lazily
 
     def chat(self, message: str, history: list[dict] | None = None) -> CoachReply:
         message = (message or "").strip()[:2000]
         if not message:
             return CoachReply("Ask me anything about your games.", "offline")
-        if self._client is None:
+        if self.backend is None:
             return OfflineCoach(self.tools).answer(message)
-        return self._agent(message, clean_history(history))
+        try:
+            if self.backend.kind == "anthropic":
+                return self._anthropic_agent(message, clean_history(history))
+            return self._openai_agent(message, clean_history(history))
+        except Exception as exc:  # noqa: BLE001 - any provider failure falls back to the offline coach
+            fallback = OfflineCoach(self.tools).answer(message)
+            reason = str(exc) if isinstance(exc, LLMError) else f"{type(exc).__name__}: {str(exc)[:160]}"
+            reason = reason.rstrip(". ") + "."
+            fallback.reply = f"(AI coach unavailable: {reason} Showing the built-in coach instead.)\n\n{fallback.reply}"
+            fallback.mode = "fallback"
+            return fallback
 
-    def _agent(self, message: str, history: list[dict]) -> CoachReply:
-        system = SYSTEM_PROMPT.format(username=self.username, rating=self.tools.dna["base_rating"])
+    def _system(self) -> str:
+        return SYSTEM_PROMPT.format(username=self.username, rating=self.tools.dna["base_rating"])
+
+    def _run_tool(self, name: str, args: dict) -> tuple[str, bool]:
+        try:
+            return json.dumps(self.tools.run(name, args), default=str), False
+        except (ToolError, KeyError, ValueError, TypeError) as exc:
+            return f"Tool error: {exc}", True
+
+    # ---- Claude ----------------------------------------------------------
+    def _anthropic_agent(self, message: str, history: list[dict]) -> CoachReply:
+        if self._client is None:
+            import anthropic  # imported lazily so other providers need no SDK
+
+            self._client = anthropic.Anthropic(api_key=self.backend.api_key)
         messages: list[dict] = history + [{"role": "user", "content": message}]
         used: list[str] = []
         for _ in range(MAX_AGENT_STEPS):
             resp = self._client.messages.create(
-                model=self.model, max_tokens=1200, system=system, tools=CoachTools.SPECS, messages=messages
+                model=self.backend.model, max_tokens=1200, system=self._system(), tools=CoachTools.SPECS, messages=messages
             )
             if resp.stop_reason != "tool_use":
                 text = "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -265,12 +318,38 @@ class Coach:
                 if block.type != "tool_use":
                     continue
                 used.append(block.name)
-                try:
-                    out = self.tools.run(block.name, block.input or {})
-                    results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(out, default=str)})
-                except (ToolError, KeyError, ValueError) as exc:
-                    results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(exc), "is_error": True})
+                content, is_error = self._run_tool(block.name, block.input or {})
+                result = {"type": "tool_result", "tool_use_id": block.id, "content": content}
+                if is_error:
+                    result["is_error"] = True
+                results.append(result)
             messages.append({"role": "user", "content": results})
+        return CoachReply("That needed more digging than I can do in one answer. Try a narrower question.", "agent", used)
+
+    # ---- OpenAI-compatible (Ollama, Groq, Gemini, OpenRouter, ...) ---------
+    def _openai_agent(self, message: str, history: list[dict]) -> CoachReply:
+        http = self._http or httpx.Client(timeout=OPENAI_TIMEOUT)
+        tools = openai_tool_specs(CoachTools.SPECS)
+        messages: list[dict] = [{"role": "system", "content": self._system() + context_brief(self.tools)}]
+        messages += history + [{"role": "user", "content": message}]
+        used: list[str] = []
+        try:
+            for _ in range(MAX_AGENT_STEPS):
+                msg = openai_chat(self.backend, messages, tools, http)
+                calls = msg.get("tool_calls") or []
+                if not calls:
+                    text = (msg.get("content") or "").strip()
+                    return CoachReply(text or "I couldn't form an answer to that.", "agent", used)
+                messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
+                for i, call in enumerate(calls):
+                    fn = call.get("function", {})
+                    name = fn.get("name", "")
+                    used.append(name)
+                    content, _ = self._run_tool(name, parse_tool_args(fn.get("arguments")))
+                    messages.append({"role": "tool", "tool_call_id": call.get("id") or f"call_{i}", "content": content})
+        finally:
+            if self._http is None:
+                http.close()
         return CoachReply("That needed more digging than I can do in one answer. Try a narrower question.", "agent", used)
 
 

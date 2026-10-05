@@ -73,3 +73,13 @@ With 5 games it said "under time pressure your play rates about 1942" from 4 mov
 - **Pure functions where it matters.** `win_percent`, `move_accuracy`, `classify` and `game_phase` have no side effects, which is why they're trivial to test.
 - **Answers never reach the browser early.** The puzzle list strips the solution, and it's returned only after an attempt (tested).
 - **Untrusted text is never inserted as HTML** in the front end (`textContent` throughout), so a hostile username or PGN header can't inject script.
+
+---
+
+## Addendum: free LLM providers (v0.2)
+
+- Added `app/llm.py`. The coach now runs on Claude, any OpenAI-compatible API (Groq, Gemini, OpenRouter...) or local Ollama, chosen automatically.
+- **Small-model safeguard:** open models of around 3B parameters often skip tool calls and then guess. For OpenAI-compatible providers, the system prompt now carries a compact brief of verified facts (skill ratings, top findings, three costliest moments with engine lines), and tools remain available for detail.
+- **Graceful failure:** any provider error (timeout, 404 missing model, 401 bad key, 429 rate limit) returns the offline coach's answer with a one-line reason, never a 500.
+- **Tests:** 33 passing. The new ones cover the OpenAI-style tool loop against a mock server, the fallback path, argument parsing, and provider priority. An end-to-end run through the live API against a fake model server also passed.
+- **Not verified:** a real Ollama model, which couldn't be downloaded in the build environment. Expect answers from a 3B model to be noticeably weaker than Claude's. Treat them as explanations of your verified data, not independent chess analysis.
