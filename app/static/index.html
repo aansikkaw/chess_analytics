@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plateau Breaker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">♜ Plateau <span>Breaker</span></div>
+    <div id="health" class="health mono"></div>
+  </header>
+
+  <section class="card importer" aria-labelledby="imp-h">
+    <h2 id="imp-h">Load your games</h2>
+    <div class="seg" role="tablist" aria-label="Game source">
+      <button role="tab" aria-selected="true" data-src="lichess" id="src-lichess">Lichess</button>
+      <button role="tab" aria-selected="false" data-src="pgn" id="src-pgn">Paste PGN</button>
+      <button role="tab" aria-selected="false" data-src="demo" id="src-demo">Demo data</button>
+    </div>
+    <form id="importForm" class="importform">
+      <div class="field" id="f-user">
+        <label for="username">Username <span class="muted" id="userHint">(your Lichess handle)</span></label>
+        <input id="username" autocomplete="off" placeholder="e.g. DrNykterstein" required>
+      </div>
+      <div class="field" id="f-max">
+        <label for="maxGames">Games</label>
+        <input id="maxGames" type="number" min="5" max="200" value="40">
+      </div>
+      <div class="field wide" id="f-pgn" hidden>
+        <label for="pgn">PGN (one or many games; your name must match White or Black)</label>
+        <textarea id="pgn" rows="6" spellcheck="false" placeholder="[Event &quot;Club championship&quot;]&#10;[White &quot;...&quot;] ..."></textarea>
+      </div>
+      <p class="muted wide" id="demoNote" hidden>40 synthetic 15+10 games for <b class="mono">demo_player</b>, an ~1850 player with a built-in time-trouble weakness. Works offline.</p>
+      <button class="btn" type="submit" id="importBtn">Analyse games</button>
+    </form>
+    <div id="job" class="job" hidden aria-live="polite">
+      <div class="jobline"><span id="jobStage">Queued</span><span id="jobCount" class="mono"></span></div>
+      <div class="bar"><i id="jobBar"></i></div>
+    </div>
+    <p id="importErr" class="err" role="alert" hidden></p>
+  </section>
+
+  <main id="app" hidden>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button role="tab" aria-selected="true" data-view="dna" id="tab-dna">Rating DNA</button>
+      <button role="tab" aria-selected="false" data-view="puzzles" id="tab-puzzles">Puzzles <span class="count" id="dueCount"></span></button>
+      <button role="tab" aria-selected="false" data-view="plan" id="tab-plan">Study plan</button>
+      <button role="tab" aria-selected="false" data-view="coach" id="tab-coach">Coach</button>
+    </nav>
+
+    <section class="view" id="view-dna" role="tabpanel" aria-labelledby="tab-dna">
+      <div class="dnahead">
+        <div><span class="eyebrow" id="who"></span><h2>Rating DNA</h2></div>
+        <div class="kpis" id="kpis"></div>
+      </div>
+      <p class="muted small" id="dnaNote"></p>
+      <div class="grid2">
+        <div class="card"><div id="dna" class="dna"></div><p class="legend small muted"><i class="refmark"></i> your overall rating · <i class="lowmark"></i> weak spot · faded = fewer than 25 moves, low confidence</p></div>
+        <div class="card"><h3>What's costing you</h3><div id="insights" class="insights"></div></div>
+      </div>
+      <div class="card"><h3>Recent games</h3><div class="scroll"><table id="recent"></table></div></div>
+    </section>
+
+    <section class="view" id="view-puzzles" role="tabpanel" aria-labelledby="tab-puzzles" hidden>
+      <div class="puzzlewrap">
+        <div class="boardcol">
+          <div id="board" class="board" aria-label="Puzzle board"></div>
+          <div class="boardfoot mono small"><span id="toMove"></span><button class="link" id="flipBtn" type="button">Flip board</button></div>
+        </div>
+        <div class="card puzzleinfo">
+          <span class="eyebrow" id="pzMeta"></span>
+          <h3 id="pzTitle">No puzzles due</h3>
+          <p id="pzPrompt" class="muted"></p>
+          <div id="pzThemes" class="chips"></div>
+          <div id="pzResult" class="result" aria-live="polite"></div>
+          <div class="row">
+            <button class="btn ghost" id="skipBtn" type="button">Skip</button>
+            <button class="btn" id="nextBtn" type="button" hidden>Next puzzle</button>
+          </div>
+          <p class="small muted">Click a piece, then its destination. Pawns promote to a queen.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-plan" role="tabpanel" aria-labelledby="tab-plan" hidden>
+      <div class="planhead"><h2>This week</h2><p class="muted" id="planFocus"></p></div>
+      <div id="plan" class="plan"></div>
+    </section>
+
+    <section class="view" id="view-coach" role="tabpanel" aria-labelledby="tab-coach" hidden>
+      <div class="card chatcard">
+        <div id="chat" class="chat" aria-live="polite"></div>
+        <div class="chips" id="suggest"></div>
+        <form id="chatForm" class="chatform">
+          <label for="chatInput" class="sr">Message the coach</label>
+          <input id="chatInput" autocomplete="off" placeholder="Why do I keep losing won positions?" maxlength="2000">
+          <button class="btn" type="submit">Send</button>
+        </form>
+        <p class="small muted" id="coachMode"></p>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

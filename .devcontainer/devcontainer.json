@@ -1,0 +1,17 @@
+{
+  "name": "chess_analytics",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y stockfish && pip install -r requirements-dev.txt",
+  "containerEnv": {
+    "STOCKFISH_PATH": "/usr/games/stockfish"
+  },
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": { "label": "Plateau Breaker", "onAutoForward": "openBrowser" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "charliermarsh.ruff"]
+    }
+  }
+}
