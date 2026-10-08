@@ -1,10 +1,11 @@
 // Signed-in shell: routing between the four jobs, the account switcher and sync, the account panel, banners.
 
-import { $, $$, PLATFORM, S, account, ago, api, del, el, fill, isPro, openDialog, patch, post, showErr, sleep, store, toast, track, upload } from "./core.js";
+import { $, $$, PLATFORM, S, account, ago, api, del, el, fill, isCoach, isPro, openDialog, patch, post, showErr, sleep, store, toast, track, upload } from "./core.js";
 import * as diagnose from "./views/diagnose.js";
 import * as train from "./views/train.js";
 import * as prepare from "./views/prepare.js";
 import * as coach from "./views/coach.js";
+import * as students from "./views/students.js";
 import { renderPlans, bindCurrency } from "./plans.js";
 import { openSupport } from "./support.js";
 
@@ -13,6 +14,7 @@ const AREAS = {
   train: { title: "Train", view: train },
   prepare: { title: "Prepare", view: prepare },
   coach: { title: "Coach", view: coach },
+  students: { title: "Students", view: students },
   plans: { title: "Plans", view: { render: renderPlansPage } },
 };
 let signOutCb = null;
@@ -20,11 +22,13 @@ let signOutCb = null;
 export async function startApp({ fresh = false } = {}, onSignOut) {
   signOutCb = onSignOut || signOutCb;
   S.me = await api("/api/me");
+  if (await joinPendingInvite()) S.me = await api("/api/me");
   $("#landing").hidden = true;
   $("#app").hidden = false;
   const saved = store.get("pb:account");
   const ids = S.me.accounts.map((a) => a.id);
-  S.accountId = ids.includes(saved) ? saved : (S.me.accounts.find((a) => a.games) || S.me.accounts[0] || {}).id || null;
+  const own = S.me.accounts.filter((a) => a.role !== "student");
+  S.accountId = ids.includes(saved) ? saved : (own.find((a) => a.games) || own[0] || S.me.accounts[0] || {}).id || null;
   renderTop();
   renderBanners();
   bindShellOnce();
@@ -35,6 +39,19 @@ export async function startApp({ fresh = false } = {}, onSignOut) {
   else route();
   const running = S.me.accounts.find((a) => a.running_job);
   if (running) pollJob(running.running_job, running.id);
+}
+
+/** A coach's invite link (/join#coach=…) opened before signing in: join their squad now. */
+async function joinPendingInvite() {
+  let token = null;
+  try { token = sessionStorage.getItem("pb:coachInvite"); sessionStorage.removeItem("pb:coachInvite"); } catch { /* storage blocked */ }
+  if (!token) return false;
+  try {
+    const r = await post("/api/coach/join", { token });
+    toast(r.message, 7000);
+    track("Joined coach");
+    return true;
+  } catch (e) { toast(e.message, 7000); return false; }
 }
 
 async function linkPending() {
@@ -66,8 +83,9 @@ export function route() {
   const main = $("#view");
   document.title = `${AREAS[area].title} · Plateau Breaker`;
   const acct = account();
-  if (area !== "plans" && !acct) { renderOnboarding(main); return; }
-  if (area !== "plans" && !acct.games) { renderWaiting(main, acct); return; }
+  const free = area === "plans" || area === "students"; // pages that don't need a chess account selected
+  if (!free && !acct) { renderOnboarding(main); return; }
+  if (!free && !acct.games) { renderWaiting(main, acct); return; }
   AREAS[area].view.render(main, sub);
   main.focus({ preventScroll: true });
 }
@@ -85,9 +103,10 @@ function bindShellOnce() {
 export function renderTop() {
   const a = account();
   $("#acctWho").textContent = a ? a.handle : "Link an account";
-  $("#acctPlat").textContent = a ? PLATFORM[a.platform] : "";
+  $("#acctPlat").textContent = a ? `${PLATFORM[a.platform]}${a.role === "student" ? " · student" : ""}` : "";
   $("#planTag").hidden = !isPro();
-  $("#planTag").textContent = S.me.plan_expires_at ? "Event Pass" : "Pro";
+  $("#planTag").textContent = isCoach() ? "Coach" : S.me.plan_expires_at ? "Event Pass" : "Pro";
+  $("#studentsLink").hidden = !isCoach();
   $("#meBtn").textContent = (S.me.email[0] || "?").toUpperCase();
   if (!S.job) $("#syncState").textContent = a ? (a.last_sync_error ? "Last sync failed" : a.platform === "pgn" || a.platform === "demo" ? `${a.games} games` : ago(a.last_synced_at)) : "";
 }
@@ -224,15 +243,21 @@ export async function pollJob(jobId, accountId) {
   S.job = jobId;
   const bar = $("#syncBar"), fill = bar.querySelector("i"), state = $("#syncState");
   bar.hidden = false;
-  let shownFirst = false;
+  let shownFirst = false, refreshedAt = 0;
   for (;;) {
     let j;
     try { j = await api(`/api/jobs/${jobId}`); } catch (e) { state.textContent = e.message; break; }
     const pct = j.total ? (100 * j.done) / j.total : j.state === "done" ? 100 : 4;
     fill.style.width = `${Math.max(3, pct)}%`;
     state.textContent = j.state === "queued" && j.position ? `Waiting for the engine (${j.position} ahead)` : j.total ? `${j.stage}: ${j.done} of ${j.total}` : j.stage;
+    if (shownFirst && j.state !== "done" && j.state !== "error" && j.done - refreshedAt >= 100) { // a big import: show the growing picture
+      refreshedAt = j.done;
+      await refreshMe().catch(() => {});
+      if (S.accountId === accountId && (location.hash.split("/")[1] || "diagnose") === "diagnose") { S.profile = null; route(); }
+    }
     if (j.first_results && !shownFirst && j.state !== "done") {
       shownFirst = true;
+      refreshedAt = j.done || 0;
       await refreshMe();
       if (S.accountId === accountId) { S.profile = null; route(); toast("Your first results are in. The rest are still being analysed."); }
     }
@@ -250,20 +275,32 @@ export async function pollJob(jobId, accountId) {
   if (S.accountId === accountId) { S.profile = null; route(); }
 }
 
+// About 2 seconds of engine time per game; the dashboard fills in after the first 20.
+function timeEstimate(n) {
+  const min = Math.max(1, Math.round((n * 2) / 60));
+  return `About ${min} minute${min === 1 ? "" : "s"} for ${n} new games. Your dashboard updates as they're analysed.`;
+}
+
 function openAccounts() {
   const body = $("#accountBody");
   const render = () => {
-    const list = el("div", { class: "acct-list" }, ...S.me.accounts.map((a) => {
+    const item = (a) => {
       const meta = a.last_sync_error ? el("span", { class: "meta bad", text: a.last_sync_error })
         : el("span", { class: "meta", text: `${a.games} games, ${a.platform === "pgn" || a.platform === "demo" ? "imported" : ago(a.last_synced_at)}${a.auto_sync ? ", auto-sync on" : ""}` });
       return el("button", { class: "acct-item", type: "button", "aria-pressed": String(a.id === S.accountId),
         onclick: () => { selectAccount(a.id); render(); } },
       el("span", {}, el("b", { text: a.handle }), " ", el("span", { class: "faint small", text: PLATFORM[a.platform] })),
       a.id === S.accountId ? el("span", { class: "tag ok", text: "Selected" }) : el("span"), meta);
-    }));
+    };
+    const mine = S.me.accounts.filter((x) => x.role !== "student");
+    const roster = S.me.accounts.filter((x) => x.role === "student");
+    const list = el("div", { class: "acct-list" }, ...mine.map(item));
     const a = account();
     fill(body,
-      S.me.accounts.length ? list : el("p", { class: "muted", text: "No accounts linked yet." }),
+      mine.length ? list : el("p", { class: "muted", text: "No accounts linked yet." }),
+      roster.length ? el("div", { class: "stack" }, el("h3", { text: "Your students" }),
+        el("p", { class: "small muted" }, "Pick one to open their full analysis. ", el("a", { href: "#/students", onclick: () => $("#accountDlg").close(), text: "Manage students" })),
+        el("div", { class: "acct-list" }, ...roster.map(item))) : null,
       a ? syncPanel(a, render) : null,
       el("div", { class: "stack" }, el("h3", { text: "Link another account" }),
         el("p", { class: "small muted", text: `Your plan allows ${S.me.limits.max_accounts} linked accounts.` }),
@@ -282,7 +319,20 @@ function syncPanel(a, rerender) {
       cb.checked = a.time_classes.includes(t);
       return el("label", { class: "check" }, cb, t[0].toUpperCase() + t.slice(1));
     });
-    const max = el("input", { type: "number", min: "5", max: String(S.me.limits.max_games_per_sync), value: String(Math.min(50, S.me.limits.max_games_per_sync)), id: "syncMax" });
+    const capN = S.me.limits.max_games_per_sync;
+    let count = Math.min(Number(store.get("pb:syncCount")) || 200, capN);
+    const picks = [50, 100, 200, 300, 500].map((n) => {
+      const b = el("button", { type: "button", class: "seg-btn", "aria-pressed": String(n === count), text: String(n),
+        onclick: () => {
+          if (n > capN) { toast(`Up to ${capN} games per sync on your plan. Pro analyses up to 500.`); return; }
+          count = n; store.set("pb:syncCount", n);
+          for (const x of picks) x.setAttribute("aria-pressed", String(Number(x.textContent) === n));
+          estimate.textContent = timeEstimate(n);
+        } });
+      if (n > capN) b.classList.add("locked");
+      return b;
+    });
+    const estimate = el("span", { class: "tiny faint", text: timeEstimate(count) });
     const auto = el("input", { type: "checkbox" });
     auto.checked = a.auto_sync;
     auto.addEventListener("change", async () => {
@@ -291,11 +341,13 @@ function syncPanel(a, rerender) {
     });
     panel.append(
       el("fieldset", {}, el("legend", { text: "Time controls" }), el("div", { class: "row" }, ...tcs)),
-      el("div", { class: "field", style: { maxWidth: "200px" } }, el("label", { for: "syncMax", text: `Games to fetch (up to ${S.me.limits.max_games_per_sync})` }), max),
+      el("fieldset", {}, el("legend", { text: "How many recent games to analyse" }),
+        el("div", { class: "seg", role: "group", "aria-label": "Number of games" }, ...picks), estimate,
+        el("p", { class: "tiny faint", text: "More games give a steadier Rating DNA. Only games you haven't analysed yet are added." })),
       el("div", { class: "row" }, el("button", { class: "btn", type: "button", text: "Sync now", onclick: () => {
         const classes = tcs.map((l) => l.querySelector("input")).filter((c) => c.checked).map((c) => c.value);
         if (!classes.length) { toast("Pick at least one time control."); return; }
-        startSync(a, { time_classes: classes, max_games: Number(max.value) || undefined });
+        startSync(a, { time_classes: classes, max_games: count });
         $("#accountDlg").close();
       } })),
       el("label", { class: "check" }, auto, "Sync new games automatically", isPro() ? null : el("span", { class: "tag pro", text: "Pro" })));
@@ -341,6 +393,14 @@ function openMe() {
       el("p", { class: "small" }, `Plan: ${S.me.plan_name}${expires}. `, el("a", { href: "#/plans", onclick: () => $("#meDlg").close(), text: "See plans" })),
       el("p", { class: "small muted", text: `Today: ${S.me.usage_today.coach} of ${S.me.limits.coach_messages_per_day} coach questions` +
         (S.me.limits.scouts_per_day ? `, ${S.me.usage_today.scout} of ${S.me.limits.scouts_per_day} scouting reports.` : ".") })),
+    S.me.coaches && S.me.coaches.length ? el("div", { class: "stack" }, el("h3", { text: "Your coach" }),
+      ...S.me.coaches.map((c) => el("p", { class: "small" }, `You're in ${c.coach_email}'s squad${S.me.sponsored_by ? ", which gives you Pro" : ""}. `,
+        el("button", { class: "link quiet small", type: "button", text: "Leave the squad", onclick: async (e) => {
+          const btn = e.currentTarget;
+          if (btn.dataset.confirm !== "1") { btn.dataset.confirm = "1"; btn.textContent = "Click again to leave"; return; }
+          try { await del(`/api/me/coaching/${c.student_id}`); await refreshMe(); $("#meDlg").close(); toast("You've left the squad."); }
+          catch (ex) { toast(ex.message); }
+        } })))) : null,
     el("div", { class: "stack" }, el("h3", { text: "Email" }), el("label", { class: "check" }, digest, "Send me a weekly summary of my games")),
     S.me.is_admin ? emailSetupPanel() : null,
     el("div", { class: "stack" }, el("h3", { text: "Help" }),

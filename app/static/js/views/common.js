@@ -2,17 +2,17 @@
 // dialogs, locked-Pro previews, small tables and the progress chart.
 
 import { $, S, api, el, openDialog, svg, toast, track } from "../core.js";
-import { Board, sideToMove, uciArrow, uciMarks } from "../board.js";
+import { Board, boardSettings, sideToMove, uciArrow } from "../board.js";
 
 // ---------------- game viewer ----------------
-export async function openGame(gameId) {
+export async function openGame(gameId, accountId = S.accountId) {
   const dlg = $("#boardDlg");
   $("#boardTitle").textContent = "Loading game…";
   $("#boardSub").textContent = "";
   $("#boardBody").replaceChildren(el("p", { class: "muted", text: "Fetching the moves…" }));
   openDialog(dlg);
   let g;
-  try { g = await api(`/api/accounts/${S.accountId}/game/${encodeURIComponent(gameId)}`); }
+  try { g = await api(`/api/accounts/${accountId}/game/${encodeURIComponent(gameId)}`); }
   catch (e) { $("#boardBody").replaceChildren(el("p", { class: "err", text: e.message })); return; }
   track("Game opened");
   const resultWord = g.result === "1/2-1/2" ? "Draw" : (g.result === "1-0") === (g.color === "white") ? "Won" : "Lost";
@@ -45,18 +45,21 @@ export async function openGame(gameId) {
   }
   sheet.append(el("table", {}, el("tbody", {}, ...rows)));
 
+  let shown = 0;
   function go(n) {
+    shown = idx;
     idx = Math.max(0, Math.min(g.moves_san.length, n));
     const k = idx - 1; // the move just played
     const m = k >= 0 ? marks.get(k) : null;
     if (m) {
       // A mistake of yours: show the position before it, your move in blue and the engine's in red.
-      board.set({ fen: g.fens[k], arrows: [uciArrow(g.ucis[k], "you"), uciArrow(m.best_uci, "coach")].filter(Boolean), marks: {} });
+      board.set({ fen: g.fens[k], lastMove: k > 0 ? g.ucis[k - 1] : null, arrows: [uciArrow(g.ucis[k], "you"), uciArrow(m.best_uci, "coach")].filter(Boolean), marks: {} });
       note.replaceChildren(el("div", { class: "mark-note" }, el("b", { text: `${cap(m.classification)}: ${m.played}` }),
         ` cost ${m.win_loss}% of your winning chances. The engine preferred `, el("b", { text: m.best || "another move" }),
         m.line && m.line.length > 1 ? `, with ${m.line.join(" ")}` : "", "."));
     } else {
-      board.set({ fen: g.fens[idx], arrows: [], marks: k >= 0 ? uciMarks(g.ucis[k], "last") : {} });
+      const step = Math.abs(idx - shown) === 1; // one move: slide the piece and play its sound
+      board.set({ fen: g.fens[idx], lastMove: k >= 0 ? g.ucis[k] : null, arrows: [], marks: {}, animate: step, sound: step && idx > shown });
       note.replaceChildren();
     }
     moveButtons.forEach((b, i) => b && b.setAttribute("aria-current", String(i === k)));
@@ -72,7 +75,7 @@ export async function openGame(gameId) {
   const controls = el("div", { class: "board-foot" },
     el("div", { class: "row" }, nav("First move", () => go(0), "⏮"), nav("Previous move", () => go(idx - 1), "◀"),
       nav("Next move", () => go(idx + 1), "▶"), nav("Last move", () => go(g.moves_san.length), "⏭")),
-    counter);
+    counter, boardSettings(board));
   const jump = g.marks.filter((m) => (m.ply % 2 === 0 ? "white" : "black") === myColor).sort((a, b) => b.win_loss - a.win_loss)[0];
   const side = el("div", { class: "stack" },
     el("p", { class: "small muted" }, "Your moves are in blue ink. ", el("span", { class: "hand", style: { fontSize: "1.15rem", margin: "0 3px 0 2px" }, text: "?" }),

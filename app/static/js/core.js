@@ -89,7 +89,8 @@ export const store = {
 };
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-export const isPro = () => !!S.me && S.me.plan === "pro";
+export const isPro = () => !!S.me && (S.me.plan === "pro" || S.me.plan === "coach");
+export const isCoach = () => !!S.me && S.me.plan === "coach";
 export const hasFeature = (f) => !!S.me && S.me.features.includes(f);
 export const account = () => S.me && S.me.accounts.find((a) => a.id === S.accountId);
 

@@ -77,6 +77,24 @@ from your own domain instead (Brevo or another provider, see DEPLOY.md).
 
 To give yourself Pro while testing, add a Codespaces secret `ADMIN_EMAILS` with your email *before* you sign up. Or grant it afterwards with `python scripts/admin.py grant you@example.com`.
 
+## New in v0.6
+
+* **Train like a puzzle site.** Your opponent's move plays in first. Then drag or click your answer, with
+  legal-move dots, the right promotion piece, sounds and ✓/✗ badges. Get it right and the board continues
+  along the engine's line. Get it wrong and you can retry; retries don't change when the puzzle comes back.
+  There are two hint levels, *Show solution*, and *Explore*, which lets you play on from any position with
+  an eval bar and the engine's best line.
+* **A real board everywhere.** Chessnut pieces, four colour themes (Green, Wood, Ice, Slate), animated moves,
+  check highlights, and right-click arrows and circles.
+* **200–500 games per sync.** Free covers up to 200 games, Pro up to 500. Pick 50, 100, 200, 300 or 500 when
+  you sync. Results appear after the first 20 games and refresh every 100. 500 games take about 15 minutes.
+* **Coach plan.** The Students page gives a squad heatmap of every student's Rating DNA, each student's
+  detail, homework, notes and invite links. Students who join get Pro free and see the homework on their
+  Train page. To turn it on for yourself: `python scripts/admin.py grant you@example.com --plan coach`.
+
+Third-party files: chess.js (BSD-2-Clause, `app/static/vendor/`) and the Chessnut piece set by Alexis
+Luengas (Apache-2.0, `app/static/pieces/chessnut/`, with its licence).
+
 ## The AI coach: pick a model
 
 Without any setup, the Coach uses a built-in rule-based coach (with citations). For the AI coach, add **one** of these as Codespaces secrets, then rebuild:
@@ -157,7 +175,7 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 |---|---|---|
 | `STOCKFISH_PATH` | auto-detected | Path to Stockfish |
 | `ENGINE_DEPTH` / `ENGINE_TIME` | `12` / `0.08` | Search limit per position |
-| `MAX_GAMES` | `300` | Server-wide cap on games per sync (cost control) |
+| `MAX_GAMES` | `500` | Server-wide cap on games per sync (cost control) |
 | `MAX_CONCURRENT_IMPORTS` | `2` | Analyses running at once |
 | `DB_PATH` | `./plateau.db` | SQLite file |
 | `ADMIN_EMAILS` | unset | Comma-separated; these get Pro + admin on signup |

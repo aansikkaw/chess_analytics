@@ -217,7 +217,7 @@ def fetch_lichess(username: str, max_games: int, time_classes=None, since_ms: in
 
 
 def fetch_chesscom(username: str, max_games: int, time_classes=None, since_ms: int | None = None,
-                   http: httpx.Client | None = None, max_archives: int = 24) -> str:
+                   http: httpx.Client | None = None, max_archives: int = 60) -> str:
     """Walk monthly archives newest-first until we have `max_games` matching games."""
     username = validate_username(username).lower()
     wanted = set(_clean_classes(time_classes))

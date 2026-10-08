@@ -306,7 +306,7 @@ def test_event_pass_expires_back_to_free(m):
 
 def test_upgrade_requests_by_plan(m):
     c = client(m, "waitlist@test.com")
-    assert "waitlist" in c.post("/api/upgrade-request", json={"plan": "coach"}).json()["message"]
+    assert "Coach plan" in c.post("/api/upgrade-request", json={"plan": "coach"}).json()["message"]
     assert c.post("/api/upgrade-request", json={"plan": "platinum"}).status_code == 400
     assert any(r["email"] == "waitlist@test.com" and r["requested"] == "coach" for r in m.store.upgrade_requests())
 

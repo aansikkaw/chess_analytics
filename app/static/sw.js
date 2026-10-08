@@ -1,9 +1,10 @@
 // Plateau Breaker service worker: makes the app installable and opens instantly.
 // Pages and code: network first, cached copy if offline. API calls are never cached.
-const VERSION = "pb-v0.5.2";
+const VERSION = "pb-v0.6.0";
 const SHELL = ["/", "/static/app.css", "/static/js/main.js", "/static/js/core.js", "/static/js/board.js", "/static/js/dna.js",
   "/static/js/landing.js", "/static/js/plans.js", "/static/js/shell.js", "/static/js/support.js", "/static/js/views/common.js",
   "/static/js/views/diagnose.js", "/static/js/views/train.js", "/static/js/views/prepare.js", "/static/js/views/coach.js",
+  "/static/js/views/students.js", "/static/vendor/chess.js",
   "/static/fonts/archivo-latin-standard-normal.woff2", "/static/fonts/chess-pieces.woff2", "/static/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {

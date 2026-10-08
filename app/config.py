@@ -76,7 +76,7 @@ class Settings:
     plausible_src: str = "https://plausible.io/js/script.tagged-events.js"
     posthog_key: str | None = None
     posthog_host: str = "https://eu.i.posthog.com"
-    app_version: str = "0.5.1"
+    app_version: str = "0.6.0"
 
 
 def _public_url() -> str:
@@ -100,7 +100,7 @@ def load_settings() -> Settings:
         stockfish_path=_find_stockfish(),
         engine_depth=int(os.getenv("ENGINE_DEPTH", "12")),
         engine_time=float(os.getenv("ENGINE_TIME", "0.08")),
-        max_games=int(os.getenv("MAX_GAMES", "300")),  # server-wide cap per sync, whatever the plan
+        max_games=int(os.getenv("MAX_GAMES", "500")),  # server-wide cap per sync, whatever the plan
         db_path=os.getenv("DB_PATH", str(PROJECT_ROOT / "plateau.db")),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         coach_model=os.getenv("COACH_MODEL", "claude-sonnet-5-5"),

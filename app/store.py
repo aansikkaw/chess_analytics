@@ -118,6 +118,31 @@ CREATE TABLE IF NOT EXISTS support_messages (
     emailed    INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS students (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    coach_id         INTEGER NOT NULL,
+    account_id       INTEGER NOT NULL,  -- a chess account owned by the coach (role 'student')
+    name             TEXT NOT NULL,
+    note             TEXT NOT NULL DEFAULT '',
+    student_user_id  INTEGER,           -- set when the student accepts the coach's invite
+    invite_hash      TEXT,
+    invite_expires   REAL,
+    joined_at        REAL,
+    created_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS students_coach ON students (coach_id);
+CREATE TABLE IF NOT EXISTS assignments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id  INTEGER NOT NULL,
+    coach_id    INTEGER NOT NULL,
+    title       TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT '',
+    skill       TEXT,
+    due_at      REAL,
+    done_at     REAL,
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS assignments_student ON assignments (student_id);
 CREATE TABLE IF NOT EXISTS kv (
     k          TEXT PRIMARY KEY,
     v          TEXT NOT NULL,
@@ -137,6 +162,7 @@ USER_COLUMNS = {  # added after v0.4; created by _migrate on older databases
 class Store:
     def __init__(self, path: str):
         self.path = path
+        self._games_cache: dict[str, tuple[tuple, list]] = {}
         with self._conn() as c:
             c.execute("PRAGMA journal_mode=WAL")
             c.executescript(SCHEMA)
@@ -151,6 +177,8 @@ class Store:
             c.execute("ALTER TABLE puzzles ADD COLUMN accept TEXT NOT NULL DEFAULT '[]'")  # extra moves that count as correct
         if "kind" not in cols("puzzles"):
             c.execute("ALTER TABLE puzzles ADD COLUMN kind TEXT NOT NULL DEFAULT 'mistake'")  # 'mistake' or 'prep'
+        if "role" not in cols("accounts"):
+            c.execute("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'own'")  # 'own' or 'student' (a coach's roster)
         if "time_classes" not in cols("accounts"):
             c.execute("ALTER TABLE accounts ADD COLUMN time_classes TEXT NOT NULL DEFAULT 'blitz,rapid,classical'")
         have = cols("users")
@@ -185,13 +213,38 @@ class Store:
             return {r["game_id"] for r in rows}
 
     def load_games(self, username: str) -> list[GameAnalysis]:
+        """All analysed games for a player. Cached per process and re-read when the games change
+        (checked with a cheap count/rowid query, so a worker process's writes are seen at once)."""
+        user = username.lower()
         with self._conn() as c:
-            rows = c.execute("SELECT data FROM games WHERE username = ?", (username.lower(),)).fetchall()
+            sig = tuple(c.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0), COALESCE(SUM(rowid), 0) FROM games WHERE username = ?",
+                                  (user,)).fetchone())
+            hit = self._games_cache.get(user)
+            if hit and hit[0] == sig:
+                return list(hit[1])
+            rows = c.execute("SELECT data FROM games WHERE username = ?", (user,)).fetchall()
         out = []
         for r in rows:
             d = json.loads(r["data"])
             d["moves"] = [MoveAnalysis(**m) for m in d["moves"]]
             out.append(GameAnalysis(**d))
+        if len(self._games_cache) >= 64:
+            self._games_cache.pop(next(iter(self._games_cache)))
+        self._games_cache[user] = (sig, out)
+        return list(out)
+
+    def games_meta(self, username: str, game_ids: set[str]) -> dict[str, dict]:
+        """Just the fields a puzzle needs from its game (moves, opponent, date), without building full analyses."""
+        if not game_ids:
+            return {}
+        ids = sorted(game_ids)[:200]
+        with self._conn() as c:
+            rows = c.execute(f"SELECT game_id, data FROM games WHERE username = ? AND game_id IN ({','.join('?' * len(ids))})",
+                             [username.lower(), *ids]).fetchall()
+        out = {}
+        for r in rows:
+            d = json.loads(r["data"])
+            out[r["game_id"]] = {k: d.get(k) for k in ("moves_san", "opponent", "played_at", "player_color", "url", "time_class")}
         return out
 
     # ---- puzzles -------------------------------------------------------
@@ -393,6 +446,9 @@ class Store:
             for table in ("accounts", "repertoires", "sessions", "usage", "upgrade_requests", "email_tokens"):
                 c.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))  # table names are constants
             c.execute("DELETE FROM support_messages WHERE user_id = ?", (user_id,))
+            c.execute("DELETE FROM assignments WHERE coach_id = ?", (user_id,))
+            c.execute("DELETE FROM students WHERE coach_id = ?", (user_id,))
+            c.execute("UPDATE students SET student_user_id = NULL, joined_at = NULL WHERE student_user_id = ?", (user_id,))
             if c.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'jobs'").fetchone():
                 c.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
             c.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -479,11 +535,11 @@ class Store:
             c.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
 
     # ---- linked chess accounts ----------------------------------------------
-    def add_account(self, user_id: int, platform: str, handle: str) -> dict:
+    def add_account(self, user_id: int, platform: str, handle: str, role: str = "own") -> dict:
         with self._conn() as c:
             c.execute(
-                "INSERT OR IGNORE INTO accounts (user_id, platform, handle, created_at) VALUES (?, ?, ?, ?)",
-                (user_id, platform, handle, time.time()),
+                "INSERT OR IGNORE INTO accounts (user_id, platform, handle, created_at, role) VALUES (?, ?, ?, ?, ?)",
+                (user_id, platform, handle, time.time(), role),
             )
             r = c.execute(
                 "SELECT * FROM accounts WHERE user_id = ? AND platform = ? AND handle = ?", (user_id, platform, handle)
@@ -528,6 +584,88 @@ class Store:
             )]
 
     # ---- usage & upgrades ---------------------------------------------------
+    # ---- coach: students and homework ------------------------------------------------
+    def add_student(self, coach_id: int, account_id: int, name: str) -> int:
+        with self._conn() as c:
+            return c.execute("INSERT INTO students (coach_id, account_id, name, created_at) VALUES (?, ?, ?, ?)",
+                             (coach_id, account_id, name, time.time())).lastrowid
+
+    def students(self, coach_id: int) -> list[dict]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT s.*, u.email AS student_email FROM students s LEFT JOIN users u ON u.id = s.student_user_id "
+                "WHERE s.coach_id = ? ORDER BY s.name COLLATE NOCASE", (coach_id,))]
+
+    def student(self, student_id: int) -> dict | None:
+        with self._conn() as c:
+            r = c.execute("SELECT s.*, u.email AS student_email FROM students s LEFT JOIN users u ON u.id = s.student_user_id "
+                          "WHERE s.id = ?", (student_id,)).fetchone()
+        return dict(r) if r else None
+
+    def update_student(self, student_id: int, **fields) -> None:
+        allowed = {k: v for k, v in fields.items() if k in ("name", "note")}
+        if allowed:
+            with self._conn() as c:
+                c.execute(f"UPDATE students SET {', '.join(f'{k} = ?' for k in allowed)} WHERE id = ?", (*allowed.values(), student_id))
+
+    def delete_student(self, student_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM assignments WHERE student_id = ?", (student_id,))
+            c.execute("DELETE FROM students WHERE id = ?", (student_id,))
+
+    def create_invite(self, student_id: int, ttl_s: float = 14 * DAY) -> str:
+        token = secrets.token_urlsafe(24)
+        with self._conn() as c:
+            c.execute("UPDATE students SET invite_hash = ?, invite_expires = ? WHERE id = ?", (_sha(token), time.time() + ttl_s, student_id))
+        return token
+
+    def accept_invite(self, token: str, user_id: int) -> dict | None:
+        """Link a student's own login to a coach's roster entry. Single use."""
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM students WHERE invite_hash = ? AND invite_expires > ?", (_sha(token), time.time())).fetchone()
+            if not r:
+                return None
+            c.execute("UPDATE students SET student_user_id = ?, joined_at = ?, invite_hash = NULL, invite_expires = NULL WHERE id = ?",
+                      (user_id, time.time(), r["id"]))
+        return self.student(r["id"])
+
+    def coaches_of(self, user_id: int) -> list[dict]:
+        """The roster entries a user has joined, with their coach."""
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT s.id, s.coach_id, s.name, s.joined_at, u.email AS coach_email, u.plan AS coach_plan, "
+                "u.plan_expires_at AS coach_plan_expires_at FROM students s JOIN users u ON u.id = s.coach_id "
+                "WHERE s.student_user_id = ?", (user_id,))]
+
+    def leave_coach(self, user_id: int, student_id: int) -> bool:
+        with self._conn() as c:
+            n = c.execute("UPDATE students SET student_user_id = NULL, joined_at = NULL WHERE id = ? AND student_user_id = ?",
+                          (student_id, user_id)).rowcount
+        return n > 0
+
+    def add_assignment(self, student_id: int, coach_id: int, title: str, detail: str, skill: str | None, due_at: float | None) -> int:
+        with self._conn() as c:
+            return c.execute("INSERT INTO assignments (student_id, coach_id, title, detail, skill, due_at, created_at) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?)", (student_id, coach_id, title, detail, skill, due_at, time.time())).lastrowid
+
+    def assignments(self, student_id: int) -> list[dict]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT * FROM assignments WHERE student_id = ? ORDER BY done_at IS NOT NULL, COALESCE(due_at, 9e18), id DESC", (student_id,))]
+
+    def assignment(self, assignment_id: int) -> dict | None:
+        with self._conn() as c:
+            r = c.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
+        return dict(r) if r else None
+
+    def set_assignment_done(self, assignment_id: int, done: bool) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE assignments SET done_at = ? WHERE id = ?", (time.time() if done else None, assignment_id))
+
+    def delete_assignment(self, assignment_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM assignments WHERE id = ?", (assignment_id,))
+
     def usage_today(self, user_id: int, kind: str) -> int:
         with self._conn() as c:
             r = c.execute(

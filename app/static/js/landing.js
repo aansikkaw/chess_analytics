@@ -96,7 +96,7 @@ function renderPreview(out, p) {
   }
   out.replaceChildren(
     el("div", { class: "section-head" }, el("div", {}, el("h2", { text: `${p.handle}: rated ${p.dna.base_rating}` }),
-      el("p", { class: "muted small", text: `From your last ${p.games} rated games, at a quick engine depth. A full account analyses up to 300 games more deeply.` }))),
+      el("p", { class: "muted small", text: `From your last ${p.games} rated games, at a quick engine depth. A full account analyses up to 500 of your games more deeply.` }))),
     el("div", { class: "preview-grid" }, el("div", { class: "sheet" }, dnaHost),
       el("div", { class: "sheet stack-lg" }, el("div", { class: "stack" }, el("h3", { text: "What's costing you" }), findings), momentBlock)),
     el("div", { class: "preview-cta" },
@@ -184,6 +184,12 @@ function bindAuthForm() {
  */
 let pendingEmailLink = null;
 export function captureEmailLink() {
+  if (location.pathname === "/join") { // a coach's invite: keep it for after sign-in, out of the address bar
+    const t = new URLSearchParams(location.hash.replace(/^#/, "")).get("coach");
+    try { if (t) sessionStorage.setItem("pb:coachInvite", t); } catch { /* storage blocked */ }
+    history.replaceState(null, "", "/");
+    return;
+  }
   if (location.pathname !== "/reset" && location.pathname !== "/verify") return;
   const fromHash = new URLSearchParams(location.hash.replace(/^#/, "")).get("token");
   const fromQuery = new URLSearchParams(location.search).get("token"); // links from older emails
@@ -212,4 +218,9 @@ export async function handleEmailLinks() {
     } catch (e) { toast(e.message, 6000); }
   }
   return false;
+}
+
+/** True when a coach's invite is waiting for the visitor to sign in. */
+export function hasCoachInvite() {
+  try { return !!sessionStorage.getItem("pb:coachInvite"); } catch { return false; }
 }

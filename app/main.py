@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import chess
+import chess.engine
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,13 +32,13 @@ from .engine import Engine, EngineUnavailable
 from .games import TIME_CLASSES, GameImportError, decode_upload, name_matches, player_names, validate_pgn_name, validate_username
 from .jobs import JobQueue
 from .llm import resolve_backends
-from .mailer import MailError, Mailer, reset_email, support_email, verification_email
+from .mailer import MailError, Mailer, coach_invite_email, reset_email, support_email, verification_email
 from .observability import analytics_config, capture_client_error, init_sentry, sentry_enabled
-from .plans import (EVENT_PASS_DAYS, FEATURE_NAMES, OFFER_IDS, PLANS, admin_emails, effective_plan, has_feature, is_pro, plan_of,
+from .plans import (EVENT_PASS_DAYS, FEATURE_NAMES, OFFER_IDS, PLANS, admin_emails, effective_plan, has_feature, is_coach, is_pro, plan_of,
                     public_plans)
 from .player_bundle import PRO_PREFIXES
 from .prep import detect_color, parse_repertoire
-from .profile import insights, rating_dna, weekly_plan
+from .profile import SKILLS, insights, rating_dna, weekly_plan
 from .progress import progress_report
 from .repertoire import repertoire_report
 from .scout import scout_report
@@ -67,6 +68,7 @@ forgot_limiter = auth.LoginLimiter(limit=5, window=3600)
 support_limiter = auth.LoginLimiter(limit=5, window=3600)
 client_error_limiter = auth.LoginLimiter(limit=30, window=600)
 resend_limiter = auth.LoginLimiter(limit=3, window=3600)
+analyse_limiter = auth.LoginLimiter(limit=240, window=3600)  # engine look-ups from Explore, per user
 signup_limiter = auth.LoginLimiter(limit=settings.signups_per_hour, window=3600)
 test_email_limiter = auth.LoginLimiter(limit=10, window=3600)
 DUMMY_HASH = auth.hash_password("timing-equaliser-not-a-real-password")
@@ -160,6 +162,16 @@ def current_user(request: Request) -> dict:
     user = store.session_user(auth.token_hash(token)) if token else None
     if not user:
         raise HTTPException(401, "Please sign in.")
+    return with_sponsor(user)
+
+
+def with_sponsor(user: dict) -> dict:
+    """A free user who has joined a coach's squad gets Pro for as long as the coach is on the Coach plan."""
+    if effective_plan(user) != "free":
+        return user
+    for link in store.coaches_of(user["id"]):
+        if effective_plan({"plan": link["coach_plan"], "plan_expires_at": link["coach_plan_expires_at"]}) == "coach":
+            return {**user, "plan": "pro", "plan_expires_at": None, "sponsored_by": link["coach_email"]}
     return user
 
 
@@ -238,6 +250,7 @@ def account_view(acct: dict) -> dict:
         "auto_sync": bool(acct["auto_sync"]), "time_classes": acct["time_classes"].split(","),
         "last_synced_at": acct["last_synced_at"], "last_sync_error": acct["last_sync_error"],
         "games": store.count_games(player_key(acct)), "running_job": queue.active_for_account(acct["id"]),
+        "role": acct.get("role") or "own",
     }
 
 
@@ -295,6 +308,16 @@ class AccountPatch(BaseModel):
 
 class AttemptRequest(BaseModel):
     move: str = Field(..., max_length=10)
+    practice: bool = False  # a retry after a miss: graded, but the review schedule isn't touched
+    hinted: bool = False  # solved after a hint: it comes back as if missed
+
+
+class HintRequest(BaseModel):
+    level: int = Field(1, ge=1, le=2)  # 1: the piece to move, 2: the whole move
+
+
+class AnalyseRequest(BaseModel):
+    fen: str = Field(..., max_length=100)
 
 
 class ChatRequest(BaseModel):
@@ -450,6 +473,8 @@ def me(user: dict = Depends(current_user)) -> dict:
         "email": user["email"], "plan": plan_id, "plan_name": p["name"], "is_admin": bool(user["is_admin"]),
         "plan_expires_at": user.get("plan_expires_at") if plan_id != "free" else None,
         "email_verified": bool(user.get("email_verified_at")), "digest": bool(user.get("digest_opt_in", 1)),
+        "sponsored_by": user.get("sponsored_by"), "max_students": p.get("max_students", 0),
+        "coaches": [{"student_id": c["id"], "coach_email": c["coach_email"]} for c in store.coaches_of(user["id"])],
         "features": sorted(p["features"]),
         "limits": {k: p[k] for k in ("max_games_per_sync", "max_accounts", "coach_messages_per_day", "scouts_per_day")},
         "usage_today": {"coach": store.usage_today(user["id"], "coach"), "scout": store.usage_today(user["id"], "scout")},
@@ -485,7 +510,7 @@ def upgrade_request(body: UpgradeRequest, user: dict = Depends(current_user)) ->
     if body.plan not in OFFER_IDS or body.plan == "free":
         raise HTTPException(400, "Unknown plan.")
     store.add_upgrade_request(user["id"], body.note, body.plan)
-    msg = {"coach": "You're on the Coach plan waitlist. We'll email you when it opens.",
+    msg = {"coach": "Thanks! We'll email you when your Coach plan is switched on.",
            "event": f"Thanks! We'll email you when your {EVENT_PASS_DAYS}-day Event Pass is switched on."}.get(
         body.plan, "Thanks! We'll email you when your Pro access is switched on.")
     return {"ok": True, "message": msg}
@@ -521,7 +546,7 @@ def preview_status(job_id: str) -> dict:
 # ---- linked accounts & imports ---------------------------------------------------------
 @app.post("/api/accounts")
 def link_account(body: LinkRequest, user: dict = Depends(current_user)) -> dict:
-    existing = store.accounts(user["id"])
+    existing = [a for a in store.accounts(user["id"]) if (a.get("role") or "own") == "own"]
     if len(existing) >= plan_of(user)["max_accounts"]:
         raise HTTPException(402, {"message": f"Your plan allows {plan_of(user)['max_accounts']} linked accounts.", "upgrade": not is_pro(user)})
     platform_allowed(body.platform)
@@ -651,19 +676,97 @@ def plan(account_id: int, minutes: int = 45, user: dict = Depends(current_user))
 @app.get("/api/accounts/{account_id}/puzzles")
 def puzzles(account_id: int, due: bool = True, limit: int = 20, user: dict = Depends(current_user)) -> list[dict]:
     acct = owned_account(account_id, user)
-    rows = store.puzzles(player_key(acct), due_only=due, limit=max(1, min(limit, 100)))
+    key = player_key(acct)
+    rows = store.puzzles(key, due_only=due, limit=max(1, min(limit, 100)))
+    _add_puzzle_context(key, rows)
     for r in rows:  # don't ship the answer to the browser before the attempt
-        for k in ("solution", "solution_san", "line"):
+        for k in ("solution", "solution_san", "line", "accept"):
             r.pop(k, None)
     return rows
 
 
+def _add_puzzle_context(key: str, rows: list[dict]) -> None:
+    """The opponent's move that led to each puzzle (so the board can play it in first), and which game it's from."""
+    games = store.games_meta(key, {r["game_id"] for r in rows if not r["game_id"].startswith("prep-")})
+    for r in rows:
+        g = games.get(r["game_id"])
+        if not g:
+            continue
+        r.update(opponent=g.get("opponent"), played_at=g.get("played_at"), game_url=g.get("url"), time_class=g.get("time_class"))
+        sans = g.get("moves_san") or []
+        if r["ply"] < 1 or len(sans) < r["ply"]:
+            continue
+        board = chess.Board()
+        try:
+            for san in sans[: r["ply"] - 1]:
+                board.push_san(san)
+            prev_fen = board.fen()
+            mv = board.parse_san(sans[r["ply"] - 1])
+            board.push(mv)
+        except ValueError:  # a game from a set-up position, or an unreadable move
+            continue
+        if board.board_fen() == r["fen"].split(" ")[0]:
+            r.update(prev_fen=prev_fen, prev_uci=mv.uci())
+
+
+def _owned_puzzle(puzzle_id: int, user: dict) -> dict:
+    p = store.get_puzzle(puzzle_id)
+    if not p or p["username"] not in {player_key(a) for a in store.accounts(user["id"])}:
+        raise HTTPException(404, "No such puzzle.")
+    return p
+
+
+@app.post("/api/puzzles/{puzzle_id}/hint")
+def puzzle_hint(puzzle_id: int, body: HintRequest, user: dict = Depends(current_user)) -> dict:
+    p = _owned_puzzle(puzzle_id, user)
+    return {"from": p["solution"][:2], "to": p["solution"][2:4] if body.level >= 2 else None}
+
+
+class RevealRequest(BaseModel):
+    practice: bool = False
+
+
+@app.post("/api/puzzles/{puzzle_id}/reveal")
+def puzzle_reveal(puzzle_id: int, body: RevealRequest, user: dict = Depends(current_user)) -> dict:
+    """Show the solution without answering: counts as a miss unless it's a practice run."""
+    p = _owned_puzzle(puzzle_id, user)
+    srs = {"practice": True} if body.practice else store.record_attempt(puzzle_id, False)
+    return {"solution": p["solution"], "solution_san": p["solution_san"], "line": p["line"], "kind": p.get("kind", "mistake"), **srs}
+
+
+@app.post("/api/engine/analyse")
+def engine_analyse(body: AnalyseRequest, user: dict = Depends(current_user)) -> dict:
+    """Explore mode: the engine's view of any position the player reaches."""
+    if state["engine"] is None:
+        raise HTTPException(503, "The engine isn't running on this server right now.")
+    key = f"user:{user['id']}"
+    if analyse_limiter.blocked(key):
+        raise HTTPException(429, "That's a lot of engine look-ups. Take a breather and try again in a while.")
+    analyse_limiter.fail(key)
+    try:
+        board = chess.Board(body.fen)
+    except ValueError as exc:
+        raise HTTPException(400, "That position isn't valid.") from exc
+    if not board.is_valid():
+        raise HTTPException(400, "That position isn't valid.")
+    if board.is_game_over():
+        outcome = board.outcome()
+        return {"over": True, "result": outcome.result() if outcome else "*", "cp": None, "mate": None, "best": None, "line": []}
+    ev = state["engine"].evaluate(board, chess.engine.Limit(depth=18, time=0.35))
+    line, b = [], board.copy()
+    for u in ev.pv[:6]:
+        mv = chess.Move.from_uci(u)
+        if mv not in b.legal_moves:
+            break
+        line.append(b.san(mv))
+        b.push(mv)
+    return {"over": False, "cp": ev.cp_white if ev.mate_white is None else None, "mate": ev.mate_white,
+            "best": ev.best_move, "best_san": line[0] if line else None, "line": line}
+
+
 @app.post("/api/puzzles/{puzzle_id}/attempt")
 def attempt(puzzle_id: int, req: AttemptRequest, user: dict = Depends(current_user)) -> dict:
-    p = store.get_puzzle(puzzle_id)
-    owned_keys = {player_key(a) for a in store.accounts(user["id"])}
-    if not p or p["username"] not in owned_keys:
-        raise HTTPException(404, "No such puzzle.")
+    p = _owned_puzzle(puzzle_id, user)
     board = chess.Board(p["fen"])
     if p.get("kind") == "prep":
         p["accept_san"] = [board.san(chess.Move.from_uci(u)) for u in p.get("accept", []) if chess.Move.from_uci(u) in board.legal_moves]
@@ -699,7 +802,7 @@ def attempt(puzzle_id: int, req: AttemptRequest, user: dict = Depends(current_us
         after = state["engine"].evaluate(after_board)
         if win_percent(best.cp_for(side)) - win_percent(after.cp_for(side)) <= ALSO_GOOD_WIN_PCT:
             verdict, note = "also_good", "Not the engine's first choice, but just as good."
-    srs = store.record_attempt(puzzle_id, verdict != "wrong")
+    srs = {"practice": True} if req.practice else store.record_attempt(puzzle_id, verdict != "wrong" and not req.hinted)
     return {"verdict": verdict, "note": note, "your_move": board.san(move), "your_uci": move.uci(), "solution": p["solution"],
             "kind": p.get("kind", "mistake"), "solution_san": p["solution_san"], "line": p["line"], "you_played_in_game": p["played_san"], **srs}
 
@@ -880,6 +983,269 @@ def export_bundle(account_id: int, user: dict = Depends(current_user)) -> Stream
     return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+# ---- coach dashboard ------------------------------------------------------------------------
+class StudentCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
+    platform: str = Field(..., pattern="^(lichess|chesscom|pgn)$")
+    handle: str = Field(..., min_length=1, max_length=60)
+
+
+class StudentPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=60)
+    note: str | None = Field(None, max_length=4000)
+
+
+class InviteRequest(BaseModel):
+    email: str | None = Field(None, max_length=200)
+
+
+class AssignmentCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=140)
+    detail: str = Field("", max_length=2000)
+    skill: str | None = Field(None, max_length=20)
+    due_days: int | None = Field(None, ge=1, le=60)
+
+
+class AssignmentPatch(BaseModel):
+    done: bool
+
+
+class JoinRequest(BaseModel):
+    token: str = Field(..., min_length=10, max_length=100)
+
+
+def coach_user(user: dict = Depends(current_user)) -> dict:
+    if not is_coach(user):
+        raise HTTPException(402, {"message": "The coach dashboard is part of the Coach plan.", "upgrade": True})
+    return user
+
+
+def owned_student(student_id: int, user: dict) -> dict:
+    st = store.student(student_id)
+    if not st or st["coach_id"] != user["id"]:
+        raise HTTPException(404, "No such student.")
+    return st
+
+
+def _skill_view(dna: dict) -> dict:
+    base = dna["base_rating"]
+    return {s["key"]: {"label": s["label"], "rating": s["rating"], "offset": s["rating"] - base, "accuracy": s["accuracy"],
+                       "low_confidence": s["low_confidence"]} for s in dna["skills"]}
+
+
+def student_summary(st: dict) -> dict:
+    acct = store.account(st["account_id"]) or {}
+    out = {"id": st["id"], "name": st["name"], "note": st.get("note") or "", "account_id": st["account_id"],
+           "platform": acct.get("platform"), "handle": acct.get("handle"), "joined": bool(st.get("student_user_id")),
+           "student_email": st.get("student_email"), "games": 0, "base_rating": None, "skills": {}, "weakest": [],
+           "accuracy": None, "accuracy_trend": None, "form": None, "last_synced_at": acct.get("last_synced_at"),
+           "last_sync_error": acct.get("last_sync_error"), "running_job": queue.active_for_account(st["account_id"]) if acct else None}
+    rows = store.assignments(st["id"])
+    out["homework_open"] = sum(1 for a in rows if not a["done_at"])
+    out["homework_done"] = sum(1 for a in rows if a["done_at"])
+    if not acct:
+        return out
+    games = store.load_games(player_key(acct))
+    if not games:
+        return out
+    dna = rating_dna(games)
+    skills = _skill_view(dna)
+    recent = sorted(games, key=lambda g: g.played_at, reverse=True)
+    last, prev = recent[:20], recent[20:40]
+    mean = lambda xs: round(sum(xs) / len(xs), 1) if xs else None  # noqa: E731
+    acc_last, acc_prev = mean([g.accuracy for g in last]), mean([g.accuracy for g in prev])
+    out.update(games=len(games), base_rating=dna["base_rating"], rating_is_estimated=dna["rating_is_estimated"],
+               accuracy=dna["overall_accuracy"], skills=skills,
+               weakest=[k for k, v in sorted(skills.items(), key=lambda kv: kv[1]["offset"]) if not v["low_confidence"]][:2],
+               accuracy_trend=round(acc_last - acc_prev, 1) if acc_last is not None and acc_prev is not None else None,
+               form=round(100 * sum(g.score for g in last) / len(last)) if last else None,
+               due_puzzles=store.count_due(player_key(acct)))
+    return out
+
+
+@app.get("/api/coach/students")
+def coach_students(user: dict = Depends(coach_user)) -> dict:
+    rows = [student_summary(st) for st in store.students(user["id"])]
+    squad: dict[str, list[int]] = {}
+    for r in rows:
+        for k, v in r["skills"].items():
+            if not v["low_confidence"]:
+                squad.setdefault(k, []).append(v["offset"])
+    labels = {k: label for k, (label, _) in SKILLS.items()}
+    squad_view = sorted(({"key": k, "label": labels.get(k, k), "avg_offset": round(sum(v) / len(v)), "students": len(v)}
+                         for k, v in squad.items()), key=lambda x: x["avg_offset"])
+    return {"students": rows, "squad": squad_view, "max_students": plan_of(user).get("max_students", 0),
+            "skills": [{"key": k, "label": label} for k, (label, _) in SKILLS.items()],
+            "games_per_student": games_cap(user)}
+
+
+@app.post("/api/coach/students")
+def add_student(body: StudentCreate, user: dict = Depends(coach_user)) -> dict:
+    cap = plan_of(user).get("max_students", 0)
+    if len(store.students(user["id"])) >= cap:
+        raise HTTPException(402, {"message": f"Your plan has room for {cap} students. Remove one to add another.", "upgrade": False})
+    if body.platform != "pgn":
+        platform_allowed(body.platform)
+    try:
+        handle = validate_pgn_name(body.handle) if body.platform == "pgn" else check_account(body.platform, body.handle)
+    except GameImportError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if any(a["platform"] == body.platform and a["handle"].lower() == handle.lower() for a in store.accounts(user["id"])):
+        raise HTTPException(409, f"{handle} is already in your accounts or on your roster.")
+    acct = store.add_account(user["id"], body.platform, handle, role="student")
+    sid = store.add_student(user["id"], acct["id"], body.name.strip())
+    if body.platform != "pgn":
+        jobs.submit("import", {"max_games": games_cap(user), "time_classes": acct["time_classes"].split(",")}, user["id"], acct["id"], exclusive=True)
+    return student_summary(store.student(sid))
+
+
+@app.get("/api/coach/students/{student_id}")
+def get_student(student_id: int, user: dict = Depends(coach_user)) -> dict:
+    st = owned_student(student_id, user)
+    out = student_summary(st)
+    acct = store.account(st["account_id"])
+    games = store.load_games(player_key(acct)) if acct else []
+    if games:
+        dna = rating_dna(games)
+        out["dna"] = dna
+        out["insights"] = insights(games, dna)[:5]
+        out["recent_games"] = [{"game_id": g.game_id, "opponent": g.opponent, "result": g.result, "score": g.score, "color": g.player_color,
+                                "accuracy": g.accuracy, "opening": g.opening, "played_at": g.played_at, "time_class": g.time_class}
+                               for g in sorted(games, key=lambda g: g.played_at, reverse=True)[:10]]
+    out["assignments"] = store.assignments(student_id)
+    out["invite_pending"] = bool(st.get("invite_hash")) and (st.get("invite_expires") or 0) > time.time()
+    return out
+
+
+@app.patch("/api/coach/students/{student_id}")
+def patch_student(student_id: int, body: StudentPatch, user: dict = Depends(coach_user)) -> dict:
+    owned_student(student_id, user)
+    store.update_student(student_id, **body.model_dump(exclude_none=True))
+    return {"ok": True}
+
+
+@app.delete("/api/coach/students/{student_id}")
+def remove_student(student_id: int, user: dict = Depends(coach_user)) -> dict:
+    st = owned_student(student_id, user)
+    acct = store.account(st["account_id"])
+    store.delete_student(student_id)
+    if acct:
+        store.delete_account(acct["id"])
+        store.delete_player(player_key(acct))
+        importer.knowledge.remove(acct)
+    return {"ok": True}
+
+
+@app.post("/api/coach/students/{student_id}/sync")
+def sync_student(student_id: int, user: dict = Depends(coach_user)) -> dict:
+    st = owned_student(student_id, user)
+    acct = store.account(st["account_id"])
+    if not acct or acct["platform"] == "pgn":
+        raise HTTPException(400, "This student's games come from PGN uploads. Upload new games to add them.")
+    return _start_import(user, acct, max_games=games_cap(user), time_classes=acct["time_classes"].split(","))
+
+
+@app.post("/api/coach/sync-all")
+def sync_all_students(user: dict = Depends(coach_user)) -> dict:
+    queued = 0
+    for st in store.students(user["id"]):
+        acct = store.account(st["account_id"])
+        live = acct and acct["platform"] in ("lichess", "chesscom") and settings_allows(acct["platform"])
+        if live and jobs.submit("import", {"max_games": games_cap(user), "time_classes": acct["time_classes"].split(",")},
+                                user["id"], acct["id"], exclusive=True):
+            queued += 1
+    return {"queued": queued, "message": f"Syncing {queued} student{'s' if queued != 1 else ''}. Each one updates as it finishes."}
+
+
+def settings_allows(platform: str) -> bool:
+    return platform != "chesscom" or settings.chesscom_enabled
+
+
+@app.post("/api/coach/students/{student_id}/invite")
+def invite_student(student_id: int, body: InviteRequest, background: BackgroundTasks, user: dict = Depends(coach_user)) -> dict:
+    st = owned_student(student_id, user)
+    token = store.create_invite(student_id)
+    link = f"{settings.public_url}/join#coach={token}"
+    sent_to = None
+    if body.email:
+        try:
+            to = auth.normalize_email(body.email)
+        except auth.AuthError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        subject, text, html = coach_invite_email(user["email"], st["name"], link)
+        background.add_task(mailer.send, to, subject, text, html, user["email"])
+        sent_to = to
+    return {"link": link, "sent_to": sent_to, "expires_in_days": 14}
+
+
+@app.post("/api/coach/join")
+def join_coach(body: JoinRequest, user: dict = Depends(current_user)) -> dict:
+    st = store.accept_invite(body.token, user["id"])
+    if not st:
+        raise HTTPException(400, "That invite has expired or was already used. Ask your coach for a new link.")
+    if st["coach_id"] == user["id"]:
+        store.leave_coach(user["id"], st["id"])
+        raise HTTPException(400, "That's your own invite link. Send it to your student.")
+    coach = store.user_by_id(st["coach_id"])
+    return {"ok": True, "message": f"You've joined {coach['email'] if coach else 'your coach'}'s squad. Pro is switched on for you."}
+
+
+@app.get("/api/me/coaching")
+def my_coaching(user: dict = Depends(current_user)) -> list[dict]:
+    out = []
+    for c in store.coaches_of(user["id"]):
+        out.append({"student_id": c["id"], "coach_email": c["coach_email"],
+                    "assignments": [{k: a[k] for k in ("id", "title", "detail", "skill", "due_at", "done_at", "created_at")}
+                                    for a in store.assignments(c["id"])]})
+    return out
+
+
+@app.delete("/api/me/coaching/{student_id}")
+def leave_coach(student_id: int, user: dict = Depends(current_user)) -> dict:
+    if not store.leave_coach(user["id"], student_id):
+        raise HTTPException(404, "You're not in that squad.")
+    return {"ok": True}
+
+
+@app.post("/api/coach/students/{student_id}/assignments")
+def add_assignment(student_id: int, body: AssignmentCreate, user: dict = Depends(coach_user)) -> dict:
+    owned_student(student_id, user)
+    if body.skill and body.skill not in SKILLS:
+        raise HTTPException(400, "Unknown skill.")
+    due = time.time() + body.due_days * 86_400 if body.due_days else None
+    aid = store.add_assignment(student_id, user["id"], body.title.strip(), body.detail.strip(), body.skill, due)
+    return store.assignment(aid)
+
+
+def _assignment_access(assignment_id: int, user: dict) -> tuple[dict, bool]:
+    """(assignment, is_coach): the coach who set it, or the student it's for."""
+    a = store.assignment(assignment_id)
+    if not a:
+        raise HTTPException(404, "No such homework.")
+    if a["coach_id"] == user["id"]:
+        return a, True
+    st = store.student(a["student_id"])
+    if st and st.get("student_user_id") == user["id"]:
+        return a, False
+    raise HTTPException(404, "No such homework.")
+
+
+@app.patch("/api/assignments/{assignment_id}")
+def patch_assignment(assignment_id: int, body: AssignmentPatch, user: dict = Depends(current_user)) -> dict:
+    _assignment_access(assignment_id, user)
+    store.set_assignment_done(assignment_id, body.done)
+    return store.assignment(assignment_id)
+
+
+@app.delete("/api/assignments/{assignment_id}")
+def delete_assignment(assignment_id: int, user: dict = Depends(current_user)) -> dict:
+    _, coach = _assignment_access(assignment_id, user)
+    if not coach:
+        raise HTTPException(403, "Only your coach can remove homework.")
+    store.delete_assignment(assignment_id)
+    return {"ok": True}
+
+
 # ---- support, monitoring, config, status --------------------------------------------------------
 @app.post("/api/support")
 def contact_support(body: SupportRequest, request: Request, background: BackgroundTasks,
@@ -1018,6 +1384,7 @@ def manifest() -> FileResponse:
 
 
 @app.get("/")
+@app.get("/join")
 @app.get("/verify")
 @app.get("/reset")
 @app.get("/app")

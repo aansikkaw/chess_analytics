@@ -4,6 +4,7 @@
   python scripts/admin.py requests                 list upgrade requests (Pro, Event Pass, Coach waitlist)
   python scripts/admin.py grant EMAIL              switch a user to Pro
   python scripts/admin.py grant EMAIL --days 10    Pro for 10 days (an Event Pass); back to Free afterwards
+  python scripts/admin.py grant EMAIL --plan coach Coach plan: Pro plus the dashboard for up to 20 students
   python scripts/admin.py revoke EMAIL             switch a user back to Free
   python scripts/admin.py support                  list recent support messages
   python scripts/admin.py jobs                     queue status
@@ -97,8 +98,14 @@ def main(argv: list[str]) -> int:
             except (IndexError, ValueError):
                 print("--days needs a number, e.g. --days 10")
                 return 1
-        store.set_plan(user["id"], "pro", time.time() + days * 86_400 if days else None)
-        print(f"{user['email']} is now on Pro" + (f" for {days:g} days (until {_day(time.time() + days * 86_400)})." if days else "."))
+        plan = "pro"
+        if "--plan" in argv:
+            plan = (argv[argv.index("--plan") + 1] if argv.index("--plan") + 1 < len(argv) else "").lower()
+            if plan not in ("pro", "coach"):
+                print("--plan must be pro or coach")
+                return 1
+        store.set_plan(user["id"], plan, time.time() + days * 86_400 if days else None)
+        print(f"{user['email']} is now on {plan.capitalize()}" + (f" for {days:g} days (until {_day(time.time() + days * 86_400)})." if days else "."))
         return 0
     print(__doc__)
     return 1

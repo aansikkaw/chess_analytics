@@ -1,7 +1,7 @@
 // Boot: config, analytics and error reporting, email links, then the landing page or the app.
 
-import { S, api, initAnalytics, initErrorReporting } from "./core.js";
-import { captureEmailLink, handleEmailLinks, initLanding, showLanding } from "./landing.js";
+import { S, api, initAnalytics, initErrorReporting, toast } from "./core.js";
+import { captureEmailLink, handleEmailLinks, hasCoachInvite, initLanding, openAuth, showLanding } from "./landing.js";
 import { startApp } from "./shell.js";
 import { initSupport } from "./support.js";
 
@@ -30,6 +30,10 @@ async function boot() {
   } catch (e) {
     if (e.status !== 401) console.error(e);
     showLanding();
+    if (hasCoachInvite()) { // came from a coach's invite: sign up (or in) to join
+      toast("Your coach invited you. Create an account, or sign in, to join their squad.", 8000);
+      openAuth("signup");
+    }
   }
 }
 

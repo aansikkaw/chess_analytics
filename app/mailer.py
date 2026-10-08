@@ -434,6 +434,17 @@ def reset_email(link: str) -> tuple[str, str, str]:
     return "Reset your password", text, html
 
 
+def coach_invite_email(coach_email: str, student_name: str, link: str) -> tuple[str, str, str]:
+    text = (f"Hi {student_name},\n\nYour coach ({coach_email}) has added you to their squad on {BRAND}, where they follow your games, "
+            f"your Rating DNA and your homework.\n\nJoin with this link to get Pro free while you're in the squad:\n{link}\n\n"
+            "The link works for 14 days. If you weren't expecting this, ignore this email.")
+    html = _html(f"{coach_email} invited you", [f"Hi {escape(student_name)},",
+                 f"Your coach ({escape(coach_email)}) has added you to their squad on {BRAND}, where they follow your games, "
+                 "your Rating DNA and your homework.", "Join to get Pro free while you're in the squad."],
+                 ("Join the squad", link), "The link works for 14 days. If you weren't expecting this, ignore this email.")
+    return f"Your coach invited you to {BRAND}", text, html
+
+
 def support_email(from_email: str, subject: str, message: str, context: str) -> tuple[str, str]:
     return f"[Support] {subject}", f"From: {from_email}\n{context}\n\n{message}"
 

@@ -1,0 +1,4 @@
+Chessnut chess pieces
+Copyright Alexis Luengas (https://github.com/LexLuengas/chessnut-pieces)
+Licensed under the Apache License, Version 2.0 (see LICENSE-2.0.txt in this folder).
+Files used unmodified, as distributed by lichess.org (public/piece/chessnut).
