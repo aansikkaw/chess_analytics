@@ -4,11 +4,12 @@ version = "0.1.0"
 requires-python = ">=3.10"
 
 [tool.ruff]
-line-length = 140
+line-length = 165
 target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "UP", "SIM", "BLE"]
+ignore = ["SIM905", "B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

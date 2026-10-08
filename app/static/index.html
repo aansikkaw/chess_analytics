@@ -2,111 +2,194 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Plateau Breaker</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Plateau Breaker: find what's costing you rating</title>
+<meta name="description" content="Stockfish checks every move you've played on Lichess, Chess.com or in ChessBase and rates you skill by skill, then trains you on your own mistakes and prepares you for your next opponent.">
+<meta name="theme-color" content="#eef1f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#10141f" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="64x64" href="/static/icons/favicon-64.png">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="preload" href="/static/fonts/archivo-latin-standard-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/chess-pieces.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<div class="wrap">
-  <header class="top">
-    <div class="brand">♜ Plateau <span>Breaker</span></div>
-    <div id="health" class="health mono"></div>
+<a class="skip" href="#main">Skip to content</a>
+
+<!-- ====================== Signed out: landing ====================== -->
+<div id="landing" class="lp" hidden>
+  <header class="lp-top">
+    <a class="brand" href="/"><span class="rook" aria-hidden="true">♜&#xFE0E;</span><span class="word">Plateau Breaker</span></a>
+    <nav class="lp-nav" aria-label="Site">
+      <a href="#how" class="hide-sm">How it works</a>
+      <a href="#plans" class="hide-sm">Plans</a>
+      <button class="btn quiet small" type="button" data-auth="login">Sign in</button>
+    </nav>
   </header>
 
-  <section class="card importer" aria-labelledby="imp-h">
-    <h2 id="imp-h">Load your games</h2>
-    <div class="seg" role="tablist" aria-label="Game source">
-      <button role="tab" aria-selected="true" data-src="lichess" id="src-lichess">Lichess</button>
-      <button role="tab" aria-selected="false" data-src="pgn" id="src-pgn">Paste PGN</button>
-      <button role="tab" aria-selected="false" data-src="demo" id="src-demo">Demo data</button>
-    </div>
-    <form id="importForm" class="importform">
-      <div class="field" id="f-user">
-        <label for="username">Username <span class="muted" id="userHint">(your Lichess handle)</span></label>
-        <input id="username" autocomplete="off" placeholder="e.g. DrNykterstein" required>
-      </div>
-      <div class="field" id="f-max">
-        <label for="maxGames">Games</label>
-        <input id="maxGames" type="number" min="5" max="200" value="40">
-      </div>
-      <div class="field wide" id="f-pgn" hidden>
-        <label for="pgn">PGN (one or many games; your name must match White or Black)</label>
-        <textarea id="pgn" rows="6" spellcheck="false" placeholder="[Event &quot;Club championship&quot;]&#10;[White &quot;...&quot;] ..."></textarea>
-      </div>
-      <p class="muted wide" id="demoNote" hidden>40 synthetic 15+10 games for <b class="mono">demo_player</b>, an ~1850 player with a built-in time-trouble weakness. Works offline.</p>
-      <button class="btn" type="submit" id="importBtn">Analyse games</button>
-    </form>
-    <div id="job" class="job" hidden aria-live="polite">
-      <div class="jobline"><span id="jobStage">Queued</span><span id="jobCount" class="mono"></span></div>
-      <div class="bar"><i id="jobBar"></i></div>
-    </div>
-    <p id="importErr" class="err" role="alert" hidden></p>
-  </section>
-
-  <main id="app" hidden>
-    <nav class="tabs" role="tablist" aria-label="Views">
-      <button role="tab" aria-selected="true" data-view="dna" id="tab-dna">Rating DNA</button>
-      <button role="tab" aria-selected="false" data-view="puzzles" id="tab-puzzles">Puzzles <span class="count" id="dueCount"></span></button>
-      <button role="tab" aria-selected="false" data-view="plan" id="tab-plan">Study plan</button>
-      <button role="tab" aria-selected="false" data-view="coach" id="tab-coach">Coach</button>
-    </nav>
-
-    <section class="view" id="view-dna" role="tabpanel" aria-labelledby="tab-dna">
-      <div class="dnahead">
-        <div><span class="eyebrow" id="who"></span><h2>Rating DNA</h2></div>
-        <div class="kpis" id="kpis"></div>
-      </div>
-      <p class="muted small" id="dnaNote"></p>
-      <div class="grid2">
-        <div class="card"><div id="dna" class="dna"></div><p class="legend small muted"><i class="refmark"></i> your overall rating · <i class="lowmark"></i> weak spot · faded = fewer than 25 moves, low confidence</p></div>
-        <div class="card"><h3>What's costing you</h3><div id="insights" class="insights"></div></div>
-      </div>
-      <div class="card"><h3>Recent games</h3><div class="scroll"><table id="recent"></table></div></div>
-    </section>
-
-    <section class="view" id="view-puzzles" role="tabpanel" aria-labelledby="tab-puzzles" hidden>
-      <div class="puzzlewrap">
-        <div class="boardcol">
-          <div id="board" class="board" aria-label="Puzzle board"></div>
-          <div class="boardfoot mono small"><span id="toMove"></span><button class="link" id="flipBtn" type="button">Flip board</button></div>
+  <main id="main">
+    <div class="wrap">
+      <section class="hero">
+        <div>
+          <h1 class="display">Find the part of your game that's costing you rating.</h1>
+          <p class="lede">Enter your Lichess username. Stockfish checks your recent games and rates you skill by skill: openings, middlegame, endgames, tactics, time, converting and defending.</p>
+          <form id="previewForm" class="preview-form" novalidate>
+            <label class="label" for="pvUser">Your Lichess username</label>
+            <div class="inline">
+              <input id="pvUser" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. aanletsgo" maxlength="30" required>
+              <button class="btn" id="pvBtn" type="submit">Diagnose my games</button>
+            </div>
+            <p class="hint">Free and no account needed. It takes about half a minute.</p>
+            <p id="pvErr" class="err" role="alert" hidden></p>
+          </form>
         </div>
-        <div class="card puzzleinfo">
-          <span class="eyebrow" id="pzMeta"></span>
-          <h3 id="pzTitle">No puzzles due</h3>
-          <p id="pzPrompt" class="muted"></p>
-          <div id="pzThemes" class="chips"></div>
-          <div id="pzResult" class="result" aria-live="polite"></div>
-          <div class="row">
-            <button class="btn ghost" id="skipBtn" type="button">Skip</button>
-            <button class="btn" id="nextBtn" type="button" hidden>Next puzzle</button>
-          </div>
-          <p class="small muted">Click a piece, then its destination. Pawns promote to a queen.</p>
+        <figure class="hero-dna" aria-labelledby="heroCap">
+          <figcaption id="heroCap"><b>Rating DNA</b><span class="small faint">Example: a 1850 player</span></figcaption>
+          <div id="heroDna"></div>
+        </figure>
+      </section>
+
+      <section id="previewOut" class="preview-out" aria-live="polite" hidden></section>
+
+      <section id="how" class="lp-section">
+        <h2>Four jobs, one place: your own games.</h2>
+        <p class="lede">Game review explains one game. Plateau Breaker reads all of them, finds the habit that costs you the most, and keeps working on it with you.</p>
+        <div class="jobs">
+          <div class="job"><h3>Diagnose</h3><p>A rating for each of 7 skills from every move you've played, and the habits behind your losses.</p>
+            <ul><li>Rating DNA across hundreds of games</li><li>Every game on a board, mistakes marked</li><li>Openings and progress over time</li></ul></div>
+          <div class="job"><h3>Train</h3><p>Your own mistakes come back as puzzles until you stop making them.</p>
+            <ul><li>Spaced repetition: 1, 3, 7, 14, 30 days</li><li>A 7-day plan built on your weakest skills</li></ul></div>
+          <div class="job"><h3>Prepare</h3><p>Check your ChessBase repertoire against the games you actually played, and scout your next opponent.</p>
+            <ul><li>Where you forgot your prep</li><li>Opponent moves your prep doesn't cover</li><li>Their weak lines and habits</li></ul></div>
+          <div class="job"><h3>Coach</h3><p>Ask anything about your play. Every move and evaluation in an answer is checked against your games first.</p>
+            <ul><li>Links to the exact positions</li><li>Anything unverified is flagged</li></ul></div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section class="view" id="view-plan" role="tabpanel" aria-labelledby="tab-plan" hidden>
-      <div class="planhead"><h2>This week</h2><p class="muted" id="planFocus"></p></div>
-      <div id="plan" class="plan"></div>
-    </section>
+      <section class="lp-section prep-pitch">
+        <div class="stack">
+          <h2>Built for the night before round one.</h2>
+          <p class="lede">Upload the repertoire you keep in ChessBase. We compare it with every game you've played and show where you left your own preparation, which replies it doesn't cover, and which lines end badly. Then we drill those positions.</p>
+          <p class="muted">Before a tournament, the Event Pass gives you Pro for 10 days to scout every opponent.</p>
+        </div>
+        <figure class="demo-board" style="margin:0">
+          <div id="pitchBoard" class="board"></div>
+          <figcaption class="board-foot"><span class="legend-ink"><span><i style="background:#2b44c9"></i>You played</span><span><i style="background:#c9372c"></i>Your prep says</span></span></figcaption>
+        </figure>
+      </section>
 
-    <section class="view" id="view-coach" role="tabpanel" aria-labelledby="tab-coach" hidden>
-      <div class="card chatcard">
-        <div id="chat" class="chat" aria-live="polite"></div>
-        <div class="chips" id="suggest"></div>
-        <form id="chatForm" class="chatform">
-          <label for="chatInput" class="sr">Message the coach</label>
-          <input id="chatInput" autocomplete="off" placeholder="Why do I keep losing won positions?" maxlength="2000">
-          <button class="btn" type="submit">Send</button>
-        </form>
-        <p class="small muted" id="coachMode"></p>
-      </div>
-    </section>
+      <section id="plans" class="lp-section">
+        <div class="section-head"><h2>Plans</h2><div class="seg" role="group" aria-label="Currency"><button type="button" data-cur="inr" aria-pressed="false">₹ INR</button><button type="button" data-cur="usd" aria-pressed="false">$ USD</button></div></div>
+        <div id="lpPlans" class="plans"></div>
+        <p class="small muted" style="margin-top:12px">Payments aren't switched on yet: choosing a paid plan sends us a request and we turn it on by hand.</p>
+      </section>
+    </div>
   </main>
+
+  <footer class="lp-foot">
+    <div class="wrap">
+      <a class="brand" href="/"><span class="rook" aria-hidden="true">♜&#xFE0E;</span>Plateau Breaker</a>
+      <nav aria-label="Footer"><a href="/status">Service status</a><button class="link quiet" type="button" data-support>Contact support</button></nav>
+    </div>
+  </footer>
 </div>
-<script src="/static/app.js"></script>
+
+<!-- ====================== Signed in: the app ====================== -->
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <a class="brand" href="#/diagnose"><span class="rook" aria-hidden="true">♜&#xFE0E;</span><span class="word">Plateau Breaker</span></a>
+    <button class="acct-switch" id="acctSwitch" type="button" aria-haspopup="dialog"><span class="who" id="acctWho">Link an account</span><span class="plat" id="acctPlat"></span><span class="caret" aria-hidden="true">▼</span></button>
+    <span class="sync-state" id="syncState" aria-live="polite"></span>
+    <span class="grow"></span>
+    <span class="tag pro" id="planTag" hidden>Pro</span>
+    <button class="me-btn" id="meBtn" type="button" aria-label="Your account"></button>
+  </header>
+  <div class="banner-area">
+    <div class="syncbar" id="syncBar" hidden><i></i></div>
+    <div id="banners"></div>
+  </div>
+  <nav class="rail" aria-label="Main">
+    <a href="#/diagnose" data-area="diagnose"><span class="ico" aria-hidden="true">♚&#xFE0E;</span>Diagnose</a>
+    <a href="#/train" data-area="train"><span class="ico" aria-hidden="true">♞&#xFE0E;</span>Train<span class="count" id="dueBadge" hidden></span></a>
+    <a href="#/prepare" data-area="prepare"><span class="ico" aria-hidden="true">♜&#xFE0E;</span>Prepare</a>
+    <a href="#/coach" data-area="coach"><span class="ico" aria-hidden="true">♛&#xFE0E;</span>Coach</a>
+    <div class="bottom">
+      <a href="#/plans" data-area="plans">Plans</a>
+      <a href="/status">Service status</a>
+      <a href="#" data-support>Contact support</a>
+    </div>
+  </nav>
+  <main class="main" id="view" tabindex="-1"></main>
+</div>
+
+<!-- ====================== Dialogs ====================== -->
+<dialog id="authDlg" class="narrow" aria-labelledby="authTitle">
+  <div class="dlg-head"><h2 id="authTitle">Sign in</h2><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body">
+    <form id="authForm" class="stack" novalidate>
+      <p id="authLead" class="muted small" hidden></p>
+      <div class="field"><label for="authEmail">Email</label><input id="authEmail" type="email" autocomplete="email" required></div>
+      <div class="field" id="authPwField"><label for="authPw">Password</label><input id="authPw" type="password" autocomplete="current-password" minlength="8" required>
+        <span class="tiny faint" id="pwHint" hidden>At least 8 characters.</span></div>
+      <button class="btn" id="authBtn" type="submit">Sign in</button>
+      <p id="authErr" class="err" role="alert" hidden></p>
+      <p id="authOk" class="small ok-text" role="status" hidden></p>
+      <div class="spread small">
+        <button class="link" type="button" id="authSwap">Create a free account</button>
+        <button class="link quiet" type="button" id="authForgot">Forgot password?</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<dialog id="accountDlg" class="drawer" aria-labelledby="accountTitle">
+  <div class="dlg-head"><h2 id="accountTitle">Your chess accounts</h2><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body stack-lg" id="accountBody"></div>
+</dialog>
+
+<dialog id="meDlg" class="drawer" aria-labelledby="meTitle">
+  <div class="dlg-head"><h2 id="meTitle">Account</h2><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body stack-lg" id="meBody"></div>
+</dialog>
+
+<dialog id="boardDlg" aria-labelledby="boardTitle">
+  <div class="dlg-head"><div><h2 id="boardTitle">Game</h2><p class="small muted" id="boardSub"></p></div><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body" id="boardBody"></div>
+</dialog>
+
+<dialog id="conceptDlg" aria-labelledby="conceptTitle">
+  <div class="dlg-head"><div><p class="small faint" id="conceptType"></p><h2 id="conceptTitle">Concept</h2></div><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body stack" id="conceptBody"></div>
+</dialog>
+
+<dialog id="supportDlg" class="narrow" aria-labelledby="supportTitle">
+  <div class="dlg-head"><h2 id="supportTitle">Contact support</h2><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body">
+    <form id="supportForm" class="stack" novalidate>
+      <p class="small muted" id="supportLead">Tell us what happened and we'll reply by email.</p>
+      <div class="field" id="supportEmailField"><label for="supportEmail">Your email</label><input id="supportEmail" type="email" autocomplete="email"></div>
+      <div class="field"><label for="supportSubject">Subject</label><input id="supportSubject" type="text" maxlength="140" required></div>
+      <div class="field"><label for="supportMsg">Message</label><textarea id="supportMsg" maxlength="5000" required></textarea></div>
+      <button class="btn" type="submit" id="supportBtn">Send message</button>
+      <p id="supportErr" class="err" role="alert" hidden></p>
+      <p id="supportOk" class="small ok-text" role="status" hidden></p>
+    </form>
+  </div>
+</dialog>
+
+<dialog id="shareDlg" aria-labelledby="shareTitle">
+  <div class="dlg-head"><h2 id="shareTitle">Share your Rating DNA</h2><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body stack">
+    <img id="shareImg" alt="Your Rating DNA card" style="width:100%;border-radius:8px;border:1px solid var(--rule)">
+    <div class="row"><button class="btn" type="button" id="shareBtn">Share</button><a class="btn quiet" id="shareDl" download="rating-dna.png">Download image</a></div>
+    <p class="small muted">The card shows your skill ratings and handle, nothing else.</p>
+  </div>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

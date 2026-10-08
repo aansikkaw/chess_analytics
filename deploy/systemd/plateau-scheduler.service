@@ -1,0 +1,14 @@
+[Unit]
+Description=Plateau Breaker scheduler (backups, restore tests, weekly email)
+After=network-online.target plateau-web.service
+
+[Service]
+User=plateau
+WorkingDirectory=/opt/plateau
+EnvironmentFile=/etc/plateau.env
+ExecStart=/opt/plateau/.venv/bin/python -m app.scheduler
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

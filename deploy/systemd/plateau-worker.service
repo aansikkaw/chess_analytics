@@ -1,0 +1,15 @@
+[Unit]
+Description=Plateau Breaker engine worker
+After=network-online.target plateau-web.service
+
+[Service]
+User=plateau
+WorkingDirectory=/opt/plateau
+EnvironmentFile=/etc/plateau.env
+ExecStart=/opt/plateau/.venv/bin/python -m app.worker
+Nice=10
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

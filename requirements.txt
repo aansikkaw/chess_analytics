@@ -4,3 +4,7 @@ uvicorn>=0.30
 httpx>=0.27
 pydantic>=2.7
 anthropic>=0.40
+pyyaml>=6.0
+python-multipart>=0.0.9
+sentry-sdk>=2.0
+cryptography>=42

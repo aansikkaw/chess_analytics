@@ -14,6 +14,8 @@ share one code path.
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -22,6 +24,10 @@ import httpx
 from .config import Settings
 
 _OLLAMA_CHECK_TTL = 30.0  # seconds to cache "is Ollama running?"
+MAX_RATE_WAIT = 30.0  # wait this long at most for a per-minute limit to reset, then give up
+RATE_RETRIES = 2
+MAX_OUTPUT_TOKENS = 2048  # the answer form is short; this also keeps free-tier token estimates low
+_sleep = time.sleep  # swapped out in tests
 _ollama_cache: dict[str, tuple[float, bool]] = {}
 
 
@@ -34,8 +40,17 @@ class Backend:
 
     @property
     def label(self) -> str:
-        names = {"anthropic": "Claude", "openai": "OpenAI-compatible API", "ollama": "Ollama (local)"}
-        return f"{names[self.kind]} · {self.model}"
+        if self.kind == "openai":
+            host = (self.base_url or "").split("//")[-1].split("/")[0]
+            name = next((v for k, v in PROVIDER_NAMES.items() if k in host), host or "OpenAI-compatible API")
+        else:
+            name = {"anthropic": "Claude", "ollama": "Ollama (local)"}[self.kind]
+        return f"{name} · {self.model}"
+
+
+PROVIDER_NAMES = {"groq.com": "Groq", "googleapis.com": "Gemini", "openrouter.ai": "OpenRouter", "together": "Together",
+                  "cerebras.ai": "Cerebras", "mistral.ai": "Mistral", "deepinfra": "DeepInfra", "openai.com": "OpenAI",
+                  "fireworks.ai": "Fireworks"}
 
 
 def ollama_running(host: str) -> bool:
@@ -65,37 +80,128 @@ def resolve_backend(s: Settings) -> Backend | None:
     return None
 
 
+def resolve_backends(s: Settings) -> list[Backend]:
+    """The primary model, then a fallback provider if one is configured (LLM_FALLBACK_*)."""
+    out: list[Backend] = []
+    primary = resolve_backend(s)
+    if primary:
+        out.append(primary)
+    if s.coach_provider != "offline" and s.llm_fallback_base_url and s.llm_fallback_model:
+        fb = Backend("openai", s.llm_fallback_model, s.llm_fallback_base_url, s.llm_fallback_api_key)
+        if fb not in out:
+            out.append(fb)
+    return out
+
+
 class LLMError(RuntimeError):
     """The LLM provider failed in a way the user can act on."""
 
 
+def relax_schema(schema: dict) -> dict:
+    """Strip numeric bounds and enums, folding them into descriptions.
+
+    Some providers (Groq, for example) reject the *whole request* when a model's tool call
+    breaks a schema bound, e.g. `limit: 20` against `maximum: 10`. The tools clamp and
+    validate their own arguments, so the schema only needs to *guide* the model.
+    """
+    out = dict(schema)
+    props = {}
+    for name, prop in (schema.get("properties") or {}).items():
+        p = dict(prop)
+        hints = []
+        if "enum" in p:
+            hints.append("one of: " + ", ".join(map(str, p.pop("enum"))))
+        lo, hi = p.pop("minimum", None), p.pop("maximum", None)
+        if lo is not None or hi is not None:
+            hints.append(f"between {lo if lo is not None else '...'} and {hi if hi is not None else '...'}")
+        if hints:
+            p["description"] = (p.get("description", "") + " (" + "; ".join(hints) + ")").strip()
+        props[name] = p
+    if props:
+        out["properties"] = props
+    return out
+
+
 def openai_tool_specs(specs: list[dict]) -> list[dict]:
-    """Convert Anthropic-style tool specs to the OpenAI `tools` format."""
+    """Convert Anthropic-style tool specs to the OpenAI `tools` format, with lenient schemas."""
     return [
-        {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+        {"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                          "parameters": relax_schema(t["input_schema"])}}
         for t in specs
     ]
 
 
-def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http: httpx.Client) -> dict:
-    """One /chat/completions call. Returns the assistant message dict."""
-    headers = {"Authorization": f"Bearer {backend.api_key}"} if backend.api_key else {}
+def _is_tool_validation_error(r: httpx.Response) -> bool:
+    text = r.text.lower()
+    return r.status_code == 400 and ("tool call validation" in text or "tool_use_failed" in text or "failed to call a function" in text)
+
+
+def rate_limit_wait(r: httpx.Response) -> float | None:
+    """Seconds to wait before retrying a 429, or None if it's a daily limit (waiting won't help today)."""
+    text = r.text
+    if re.search(r"per day|\((?:TPD|RPD)\)", text, re.I):
+        return None
     try:
-        r = http.post(
-            f"{backend.base_url}/chat/completions",
-            headers=headers,
-            json={"model": backend.model, "messages": messages, "tools": tools, "temperature": 0.3},
-        )
-    except httpx.TimeoutException as exc:
-        raise LLMError("The model took too long to answer. A smaller model or a bigger machine will help.") from exc
-    except httpx.HTTPError as exc:
-        raise LLMError(f"Couldn't reach the model at {backend.base_url}: {exc}") from exc
+        return max(0.5, float(r.headers.get("retry-after", "")))
+    except ValueError:
+        pass
+    m = re.search(r"try again in\s+(?:(\d+)m)?\s*(?:([\d.]+)s|(\d+)ms)", text, re.I)  # Groq: "1m2.5s", "7.3s", "450ms"
+    if m:
+        mins, secs, ms = m.groups()
+        return max(0.5, int(mins or 0) * 60 + float(secs or 0) + int(ms or 0) / 1000)
+    return 20.0
+
+
+def request_extras(backend: Backend) -> dict:
+    """Provider-specific knobs. gpt-oss models think at length by default, and free tiers count those tokens."""
+    extras: dict = {"max_tokens": MAX_OUTPUT_TOKENS}
+    effort = os.environ.get("LLM_REASONING_EFFORT", "low" if "gpt-oss" in backend.model else "")
+    if effort and backend.kind == "openai":
+        extras["reasoning_effort"] = effort
+    return extras
+
+
+def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http: httpx.Client, wait_for_limits: bool = True) -> dict:
+    """One /chat/completions call. Returns the assistant message dict.
+
+    - A malformed tool call rejected by the provider: retry once at temperature 0.
+    - A per-minute rate limit (429): wait as long as the provider asks (up to MAX_RATE_WAIT), then retry.
+    - A daily limit: fail straight away with a clear message.
+    """
+    headers = {"Authorization": f"Bearer {backend.api_key}"} if backend.api_key else {}
+    body = {"model": backend.model, "messages": messages, "tools": tools, **request_extras(backend)}
+    temperature, rate_retries, r = 0.3, 0, None
+    for _ in range(2 + RATE_RETRIES):
+        try:
+            r = http.post(f"{backend.base_url}/chat/completions", headers=headers, json={**body, "temperature": temperature})
+        except httpx.TimeoutException as exc:
+            raise LLMError("The model took too long to answer. A smaller model or a bigger machine will help.") from exc
+        except httpx.HTTPError as exc:
+            raise LLMError(f"Couldn't reach the model at {backend.base_url}: {exc}") from exc
+        if r.status_code == 429:
+            wait = rate_limit_wait(r)
+            if wait is None:
+                raise LLMError("You've used up the provider's free daily allowance for this model. It resets within 24 hours; "
+                               "until then, switch LLM_MODEL or use another provider.")
+            if not wait_for_limits or wait > MAX_RATE_WAIT or rate_retries >= RATE_RETRIES:
+                raise LLMError("The provider's per-minute rate limit was hit. Wait a minute and try again.")
+            rate_retries += 1
+            _sleep(wait + 0.5)
+            continue
+        if _is_tool_validation_error(r) and temperature > 0:
+            temperature = 0.0
+            continue
+        break
     if r.status_code == 404 and backend.kind == "ollama":
         raise LLMError(f"Ollama doesn't have the model '{backend.model}'. Run: ollama pull {backend.model}")
     if r.status_code in (401, 403):
         raise LLMError("The API key was rejected. Check LLM_API_KEY.")
+    if r.status_code == 413:
+        raise LLMError("That conversation is too long for this model's free tier. Start a new chat and ask again.")
     if r.status_code == 429:
-        raise LLMError("The provider's rate limit was hit. Wait a minute and try again.")
+        raise LLMError("The provider's per-minute rate limit was hit. Wait a minute and try again.")
+    if _is_tool_validation_error(r):
+        raise LLMError("The model made an invalid tool call twice in a row. Try rephrasing, or use a larger model.")
     if r.status_code >= 400:
         raise LLMError(f"The model provider returned an error ({r.status_code}): {r.text[:200]}")
     try:

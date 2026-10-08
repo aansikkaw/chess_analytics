@@ -1,0 +1,19 @@
+# Without Docker: the web app. Assumes the code in /opt/plateau with a virtualenv in /opt/plateau/.venv,
+# settings in /etc/plateau.env (same variables as deploy/.env.example), and Caddy installed from apt
+# proxying to 127.0.0.1:8000.  Install:  cp deploy/systemd/*.service /etc/systemd/system/ &&
+# systemctl daemon-reload && systemctl enable --now plateau-web plateau-worker plateau-scheduler
+[Unit]
+Description=Plateau Breaker web
+After=network-online.target
+
+[Service]
+User=plateau
+WorkingDirectory=/opt/plateau
+EnvironmentFile=/etc/plateau.env
+Environment=JOB_MODE=external
+ExecStart=/opt/plateau/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

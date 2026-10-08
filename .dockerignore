@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+*.db
+*.db-*
+bundles
+outbox
+bin
+deploy/.env
+tests

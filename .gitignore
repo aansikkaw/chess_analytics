@@ -4,3 +4,11 @@ __pycache__/
 bin/
 .pytest_cache/
 .ruff_cache/
+
+# v0.5
+deploy/.env
+.env
+outbox/
+bundles/
+*.db
+*.db-*

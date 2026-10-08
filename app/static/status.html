@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Service status · Plateau Breaker</title>
+<meta name="theme-color" content="#eef1f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#10141f" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="lp">
+  <header class="lp-top">
+    <a class="brand" href="/"><span class="rook" aria-hidden="true">♜&#xFE0E;</span><span class="word">Plateau Breaker</span></a>
+    <nav class="lp-nav" aria-label="Site"><a href="/">Back to the app</a></nav>
+  </header>
+  <main id="main" class="wrap" style="max-width:760px;width:100%;padding-bottom:48px">
+    <h1 style="margin:12px 0 18px">Service status</h1>
+    <div class="status-head" id="overall" aria-live="polite"><span class="status-dot" id="dot"></span><div><h2 id="headline">Checking…</h2><p class="small muted" id="checked"></p></div></div>
+    <ul class="checks" id="checks"></ul>
+    <p class="small muted" style="margin-top:18px" id="contact">Something not working? <button class="link" type="button" data-support>Contact support</button>.</p>
+  </main>
+</div>
+<dialog id="supportDlg" class="narrow" aria-labelledby="supportTitle">
+  <div class="dlg-head"><h2 id="supportTitle">Contact support</h2><button class="x" type="button" data-close aria-label="Close">×</button></div>
+  <div class="dlg-body">
+    <form id="supportForm" class="stack" novalidate>
+      <p class="small muted" id="supportLead">Tell us what happened and we'll reply by email.</p>
+      <div class="field" id="supportEmailField"><label for="supportEmail">Your email</label><input id="supportEmail" type="email" autocomplete="email"></div>
+      <div class="field"><label for="supportSubject">Subject</label><input id="supportSubject" type="text" maxlength="140" required></div>
+      <div class="field"><label for="supportMsg">Message</label><textarea id="supportMsg" maxlength="5000" required></textarea></div>
+      <button class="btn" type="submit" id="supportBtn">Send message</button>
+      <p id="supportErr" class="err" role="alert" hidden></p>
+      <p id="supportOk" class="small ok-text" role="status" hidden></p>
+    </form>
+  </div>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="/static/js/status.js"></script>
+</body>
+</html>

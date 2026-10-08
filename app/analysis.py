@@ -138,6 +138,12 @@ class GameAnalysis:
     peak_cp: int  # best eval the player reached, their POV
     conversion_failure: bool
     moves: list[MoveAnalysis]
+    # Added in v0.3; defaults keep games saved by older versions loadable.
+    moves_san: list[str] = field(default_factory=list)  # every move of the game, both sides
+    time_class: str = ""
+    termination: str = ""
+    url: str = ""
+    lost_on_time: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -183,6 +189,7 @@ def analyse_game(game: GameRecord, engine: Engine) -> GameAnalysis:
         boards.append(board.copy())
 
     mover_color = game.player_color
+    moves_san = [boards[i].san(chess.Move.from_uci(u)) for i, u in enumerate(game.moves)]
     analysed: list[MoveAnalysis] = []
     peak = -EVAL_CLAMP_CP
     for ply, uci in enumerate(game.moves):
@@ -240,6 +247,11 @@ def analyse_game(game: GameRecord, engine: Engine) -> GameAnalysis:
         peak_cp=peak,
         conversion_failure=peak >= CONVERSION_PEAK_CP and game.player_score < 1.0,
         moves=analysed,
+        moves_san=moves_san,
+        time_class=game.time_class,
+        termination=game.termination,
+        url=game.url,
+        lost_on_time=game.lost_on_time,
     )
 
 

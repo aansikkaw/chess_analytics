@@ -1,0 +1,32 @@
+# HTTPS for Plateau Breaker. Caddy gets and renews the certificate by itself.
+# DOMAIN comes from deploy/.env, e.g. DOMAIN=plateaubreaker.com
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Cache headers come from the app: fonts/icons for a week, JS/CSS revalidated on every load,
+	# so a deploy reaches everyone at once.
+
+	header {
+		-Server
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy web:8000 {
+		# Big PGN uploads and slow coach answers need time.
+		transport http {
+			read_timeout 5m
+			write_timeout 5m
+		}
+	}
+
+	request_body {
+		max_size 30MB
+	}
+
+	# No access log: the app logs what it needs, and URLs never end up in log files.
+}
+
+# Redirect www to the bare domain.
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}
