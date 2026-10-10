@@ -57,8 +57,9 @@ def test_hint_reveal_and_practice_attempts(m):
         after = m.store.get_puzzle(p["id"])
         assert (after["box"], after["attempts"], after["due_at"]) == (before["box"], before["attempts"], before["due_at"])
         # Reveal: the line, counted as a miss unless practising
-        q = _puzzles(c, a)
-        other = next(x for x in q if x["id"] != p["id"])
+        # Any puzzle will do (how many mistakes the quick test engine finds depends on the machine's speed)
+        q = c.get(f"/api/accounts/{a['id']}/puzzles?due=false&limit=50").json()
+        other = next((x for x in q if x["id"] != p["id"]), p)
         rv = c.post(f"/api/puzzles/{other['id']}/reveal", json={}).json()
         assert rv["solution"] and rv["line"] and rv["box"] == 1
         assert c.post(f"/api/puzzles/{other['id']}/reveal", json={"practice": True}).json()["practice"] is True

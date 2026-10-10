@@ -192,13 +192,13 @@ class Importer:
                 records.sort(key=lambda r: r.played_at.replace("?", "0"), reverse=True)
                 new = [r for r in records if r.game_id not in known][: p["max_games"]]
                 p = {"max_games": p["max_games"], "pending": [_record_to_dict(r) for r in new], "skipped": len(records) - len(new),
-                     "total": len(new), "done": 0, "added": 0, "fetched_at": fetched_at}
+                     "total": len(new), "done": 0, "added": 0, "fetched_at": fetched_at, "found": len(records)}
                 ctx.progress(stage="Waiting for the engine" if new else "Up to date", total=len(new), done=0, skipped=p["skipped"])
                 if not new:
                     if not (self.knowledge.path(account) / "log.md").exists():
                         self.knowledge.rebuild(account)
                     self.store.update_account(account["id"], last_synced_at=fetched_at, last_sync_error=None)
-                    return {"new_games": 0, "skipped": p["skipped"], "puzzles_added": 0}
+                    return {"new_games": 0, "skipped": p["skipped"], "puzzles_added": 0, "found": p["found"]}
 
             # One chunk of analysis.
             chunk = [_record_from_dict(d) for d in p["pending"][: self.settings.import_chunk]]
@@ -238,7 +238,8 @@ class Importer:
             # The next incremental sync starts from when these games were *fetched*, not when analysis ended:
             # a long import can take over an hour, and games played meanwhile must not be skipped.
             self.store.update_account(account["id"], last_synced_at=p.get("fetched_at") or time.time(), last_sync_error=None)
-            return {"new_games": p["done"], "skipped": p["skipped"], "puzzles_added": p["added"], "first_results": True}
+            return {"new_games": p["done"], "skipped": p["skipped"], "puzzles_added": p["added"], "first_results": True,
+                    "found": p.get("found")}
         except GameImportError as exc:
             self.store.update_account(account["id"], last_sync_error=str(exc))
             raise JobError(str(exc)) from exc

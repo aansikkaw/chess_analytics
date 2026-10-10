@@ -263,7 +263,10 @@ export async function pollJob(jobId, accountId) {
     }
     if (j.state === "error") { toast(j.error, 8000); break; }
     if (j.state === "done") {
-      toast(j.new_games ? `Done: ${j.new_games} new games and ${j.puzzles_added || 0} new puzzles.` : j.drills != null ? `Prep Check done: ${j.drills} drills added.` : "You're up to date: no new games.");
+      toast(j.new_games ? `Done: ${j.new_games} new games and ${j.puzzles_added || 0} new puzzles.`
+        : j.drills != null ? `Prep Check done: ${j.drills} drills added.`
+        : j.found != null ? `No new games. The site returned ${j.found} rated games in your chosen time controls, and all are analysed already. To find more, tick more time controls (e.g. bullet) in Sync.`
+        : "You're up to date: no new games.", 9000);
       break;
     }
     await sleep(1200);

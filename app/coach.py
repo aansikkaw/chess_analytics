@@ -19,6 +19,7 @@ With no LLM configured, a rule-based coach answers from the same bundle with the
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,11 +32,12 @@ from .analysis import GameAnalysis, win_percent
 from .answer import FINAL_ANSWER_SPEC, CoachAnswer, answer_from_text, clean_text, parse_answer
 from .engine import Engine
 from .grounding import Grounding, concept_links, repair_instruction, strip_unknown_links
-from .llm import Backend, LLMError, openai_chat, openai_tool_specs, parse_tool_args
+from .llm import Backend, LLMError, ToolCallRejected, openai_chat, openai_tool_specs, parse_tool_args
 from .okf import Bundle, Concept
 from .player_bundle import PRO_PREFIXES
 from .profile import SKILLS, insights, rating_dna, weekly_plan
 
+log = logging.getLogger("plateau.coach")
 MAX_AGENT_STEPS = 8
 MAX_REPAIRS = 1
 MAX_HISTORY_TURNS = 10
@@ -340,6 +342,9 @@ Rules (answers are automatically checked; unverified content is rejected):
 - For the *why*, use the principle concepts under /knowledge (general advice, unverified until reviewed).
 - Pitch explanations at a {rating} player in a calm, professional tone. Use SAN for moves. Keep it brief."""
 
+LONG_OUTPUT_TOKENS = 6144  # the retry budget when a reasoning model ran out of room before answering
+REJECTED = ("Your last tool call was rejected by the API ({reason}). Call exactly one tool, with arguments that match "
+            "its schema (right names and types, nothing extra). If you already have the facts, call final_answer.")
 NUDGE = ("Reply by calling final_answer with summary, evidence and next_step. Do not write the answer as plain text, "
          "and do not include your reasoning.")
 
@@ -395,6 +400,7 @@ class _Run:
     used: list[str] = field(default_factory=list)
     repairs: int = 0
     nudges: int = 0
+    rejections: int = 0
 
 
 class Coach:
@@ -482,6 +488,33 @@ class Coach:
         run.repairs += 1
         return None, repair_instruction(problems) + " Then call final_answer again."
 
+    def _salvage(self, generation: str, run: _Run) -> CoachReply | None:
+        """A rejected tool call often still holds a usable answer: final_answer arguments, or plain prose."""
+        text = (generation or "").strip()
+        if not text:
+            return None
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                obj = json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                obj = None
+            if isinstance(obj, dict):
+                args = obj
+                for key in ("arguments", "parameters", "input"):
+                    if key in obj:
+                        args = parse_tool_args(obj[key])
+                        break
+                if isinstance(args, dict) and isinstance(args.get("summary"), str):
+                    try:
+                        ans = parse_answer(args)
+                    except ValueError:
+                        return None
+                    return self._accept(ans, run.grounding.check(ans.to_markdown()), run)
+            return None  # a call to some other tool: let the model retry it properly
+        prose = clean_text(text)
+        return self._from_prose(prose, run) if len(prose) >= 40 else None
+
     def _from_prose(self, text: str, run: _Run) -> CoachReply:
         """Last resort when a model answers in prose despite the nudge: clean it, structure it, flag anything unverified."""
         ans = answer_from_text(text)
@@ -508,9 +541,10 @@ class Coach:
             self._client = anthropic.Anthropic(api_key=self.backend.api_key)
         run, brief = self._new_run()
         messages: list[dict] = history + [{"role": "user", "content": message}]
-        for _ in range(MAX_AGENT_STEPS):
+        for step in range(MAX_AGENT_STEPS):
+            extra = {"tool_choice": {"type": "tool", "name": "final_answer"}} if run.nudges or step == MAX_AGENT_STEPS - 1 else {}
             resp = self._client.messages.create(
-                model=self.backend.model, max_tokens=1500, system=self._system(brief), tools=self.specs, messages=messages
+                model=self.backend.model, max_tokens=1500, system=self._system(brief), tools=self.specs, messages=messages, **extra
             )
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if not tool_uses:
@@ -519,6 +553,8 @@ class Coach:
                     run.nudges += 1
                     messages += [{"role": "assistant", "content": text or "(no answer)"}, {"role": "user", "content": NUDGE}]
                     continue
+                if not text:
+                    raise LLMError("The model returned an empty answer twice")
                 return self._from_prose(text, run)
             messages.append({"role": "assistant", "content": resp.content})
             results = []
@@ -535,7 +571,7 @@ class Coach:
                     result["is_error"] = True
                 results.append(result)
             messages.append({"role": "user", "content": results})
-        return CoachReply("That needed more digging than I can do in one answer. Try a narrower question.", "agent", run.used)
+        raise LLMError("The model kept researching without answering")
 
     # ---- OpenAI-compatible (Groq, Gemini, OpenRouter, Ollama, ...) -------------------------
     def _openai_agent(self, message: str, history: list[dict]) -> CoachReply:
@@ -546,18 +582,43 @@ class Coach:
         tools = openai_tool_specs(self.specs)
         messages: list[dict] = [{"role": "system", "content": self._system(brief)}]
         messages += history + [{"role": "user", "content": message}]
+        force_final = {"type": "function", "function": {"name": "final_answer"}}
         try:
-            for _ in range(MAX_AGENT_STEPS):
+            for step in range(MAX_AGENT_STEPS):
                 shrink_history(messages)
-                msg = openai_chat(self.backend, messages, tools, http, wait_for_limits=wait)
+                # After a nudge, or on the last step, require the answer tool: some models (gpt-oss) otherwise
+                # spend the turn reasoning and return nothing.
+                choice = force_final if run.nudges or step == MAX_AGENT_STEPS - 1 else None
+                try:
+                    msg = openai_chat(self.backend, messages, tools, http, wait_for_limits=wait, tool_choice=choice)
+                    if not msg.get("tool_calls") and not clean_text(msg.get("content") or "") and msg.get("_finish") == "length":
+                        # It spent its whole budget thinking (gpt-oss counts reasoning against max_tokens): once more, with room.
+                        log.warning("coach: %s hit its token limit while reasoning (usage %s); retrying with a larger budget",
+                                    self.backend.model, msg.get("_usage"))
+                        msg = openai_chat(self.backend, messages, tools, http, wait_for_limits=wait, tool_choice=choice,
+                                          max_tokens=LONG_OUTPUT_TOKENS)
+                except ToolCallRejected as exc:
+                    salvaged = self._salvage(exc.failed_generation, run)
+                    if salvaged:
+                        return salvaged
+                    if run.rejections >= 2:
+                        raise
+                    run.rejections += 1  # say what was wrong and let the model try again
+                    messages.append({"role": "user", "content": REJECTED.format(reason=exc.detail[:300] or "invalid arguments")})
+                    continue
                 calls = msg.get("tool_calls") or []
                 if not calls:
-                    text = msg.get("content") or ""
+                    text = clean_text(msg.get("content") or "")
+                    if not text:
+                        log.warning("coach: empty reply from %s (finish=%s, reasoned=%s, usage=%s, forced=%s)", self.backend.model,
+                                    msg.get("_finish"), msg.get("_reasoned"), msg.get("_usage"), bool(choice))
                     if run.nudges < 1:
                         run.nudges += 1
-                        messages += [{"role": "assistant", "content": clean_text(text) or "(no answer)"},
+                        messages += [{"role": "assistant", "content": text or "(no answer)"},
                                      {"role": "user", "content": NUDGE}]
                         continue
+                    if not text:  # nothing at all: let the next provider, or the built-in coach, answer instead
+                        raise LLMError("The model returned an empty answer twice")
                     return self._from_prose(text, run)
                 # Keep only the tool calls in history: any reasoning text the model emitted alongside is dropped.
                 messages.append({"role": "assistant", "content": "", "tool_calls": calls})
@@ -576,7 +637,7 @@ class Coach:
         finally:
             if self._http is None:
                 http.close()
-        return CoachReply("That needed more digging than I can do in one answer. Try a narrower question.", "agent", run.used)
+        raise LLMError("The model kept researching without answering")
 
 
 class OfflineCoach:

@@ -67,6 +67,9 @@ class Evidence(BaseModel):
         return v if v.startswith("/") else "/" + v
 
 
+DEFAULT_NEXT_STEP = "Do your due puzzles in Train, then ask me about one of the positions above."
+
+
 class CoachAnswer(BaseModel):
     """What the user sees. Lenient where it can be (trims lists), strict where it matters."""
 
@@ -74,7 +77,7 @@ class CoachAnswer(BaseModel):
 
     summary: str = Field(..., min_length=10, max_length=900, description="The direct answer in one to three sentences.")
     evidence: list[Evidence] = Field(default_factory=list, description=f"Up to {MAX_EVIDENCE} supporting points.")
-    next_step: str = Field(..., min_length=5, max_length=400, description="One concrete thing to do next.")
+    next_step: str = Field(DEFAULT_NEXT_STEP, min_length=5, max_length=400, description="One concrete thing to do next.")
 
     @field_validator("summary", "next_step", mode="before")
     @classmethod
@@ -131,7 +134,7 @@ FINAL_ANSWER_SPEC = {
             },
             "next_step": {"type": "string", "description": "One concrete action."},
         },
-        "required": ["summary", "next_step"],
+        "required": ["summary"],  # next_step has a default: a missing field shouldn't get a whole answer rejected
     },
 }
 

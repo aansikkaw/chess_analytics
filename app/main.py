@@ -603,7 +603,10 @@ def sync_account(account_id: int, body: SyncRequest, user: dict = Depends(verifi
     if not classes:
         raise HTTPException(400, "Pick at least one time control.")
     store.update_account(account_id, time_classes=",".join(classes))
-    return _start_import(user, acct, max_games=min(body.max_games or cap, cap), time_classes=classes, full=body.full)
+    want = min(body.max_games or cap, cap)
+    # Asking for more games than are already analysed means "go back through my history", not just "anything new".
+    backfill = body.full or want > store.count_games(player_key(acct))
+    return _start_import(user, acct, max_games=want, time_classes=classes, full=backfill)
 
 
 @app.post("/api/accounts/{account_id}/pgn")

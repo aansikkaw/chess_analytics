@@ -97,6 +97,16 @@ class LLMError(RuntimeError):
     """The LLM provider failed in a way the user can act on."""
 
 
+class ToolCallRejected(LLMError):
+    """The provider rejected the model's tool call. Carries the provider's reason and what the model tried to write,
+    so the coach can salvage an answer or tell the model exactly what to fix."""
+
+    def __init__(self, message: str, detail: str = "", failed_generation: str = ""):
+        super().__init__(message)
+        self.detail = detail
+        self.failed_generation = failed_generation
+
+
 def relax_schema(schema: dict) -> dict:
     """Strip numeric bounds and enums, folding them into descriptions.
 
@@ -161,7 +171,8 @@ def request_extras(backend: Backend) -> dict:
     return extras
 
 
-def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http: httpx.Client, wait_for_limits: bool = True) -> dict:
+def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http: httpx.Client, wait_for_limits: bool = True,
+                tool_choice: str | dict | None = None, max_tokens: int | None = None) -> dict:
     """One /chat/completions call. Returns the assistant message dict.
 
     - A malformed tool call rejected by the provider: retry once at temperature 0.
@@ -170,6 +181,10 @@ def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http:
     """
     headers = {"Authorization": f"Bearer {backend.api_key}"} if backend.api_key else {}
     body = {"model": backend.model, "messages": messages, "tools": tools, **request_extras(backend)}
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
+    if max_tokens:
+        body["max_tokens"] = max_tokens
     temperature, rate_retries, r = 0.3, 0, None
     for _ in range(2 + RATE_RETRIES):
         try:
@@ -188,6 +203,9 @@ def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http:
             rate_retries += 1
             _sleep(wait + 0.5)
             continue
+        if r.status_code == 400 and "tool_choice" in body and "tool_choice" in r.text:
+            body.pop("tool_choice")  # a provider that can't force a tool: ask normally instead
+            continue
         if _is_tool_validation_error(r) and temperature > 0:
             temperature = 0.0
             continue
@@ -201,13 +219,25 @@ def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http:
     if r.status_code == 429:
         raise LLMError("The provider's per-minute rate limit was hit. Wait a minute and try again.")
     if _is_tool_validation_error(r):
-        raise LLMError("The model made an invalid tool call twice in a row. Try rephrasing, or use a larger model.")
+        try:
+            err = r.json().get("error") or {}
+        except ValueError:
+            err = {}
+        raise ToolCallRejected("The model made an invalid tool call twice in a row. Try rephrasing, or use a larger model.",
+                               detail=str(err.get("message") or "")[:500], failed_generation=str(err.get("failed_generation") or "")[:6000])
     if r.status_code >= 400:
         raise LLMError(f"The model provider returned an error ({r.status_code}): {r.text[:200]}")
     try:
-        return r.json()["choices"][0]["message"]
-    except (ValueError, KeyError, IndexError) as exc:
+        data = r.json()
+        choice = data["choices"][0]
+        msg = dict(choice["message"])
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise LLMError("The model returned a response I couldn't read.") from exc
+    # Not sent back to the model: why it stopped, and what it used, for retries and the server log.
+    msg["_finish"] = choice.get("finish_reason")
+    msg["_usage"] = data.get("usage") or {}
+    msg["_reasoned"] = bool(msg.pop("reasoning", None) or msg.pop("reasoning_content", None))
+    return msg
 
 
 def parse_tool_args(raw) -> dict:

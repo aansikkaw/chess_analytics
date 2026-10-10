@@ -410,13 +410,21 @@ def test_backup_to_s3_compatible_storage(tmp_path, monkeypatch):
 
 def test_backup_cli_records_the_result(tmp_path):
     db = _db(tmp_path)
-    env = {"PATH": "/usr/bin:/bin", "DB_PATH": db, "BACKUP_TARGET": str(tmp_path / "cli"), "HOME": str(tmp_path)}
+    env = {**_clean_env(), "DB_PATH": db, "BACKUP_TARGET": str(tmp_path / "cli")}
     run = lambda *a: subprocess.run([sys.executable, str(ROOT / "scripts" / "backup.py"), *a], env=env, capture_output=True, text=True)  # noqa: E731
     assert run("run").returncode == 0
     assert run("test-restore").returncode == 0
     assert Store(db).kv_get("last_backup")["ok"] and Store(db).kv_get("last_restore_test")["ok"]
     r = run("restore", "--to", db)
     assert r.returncode != 0 and "live database" in r.stderr  # refuses to overwrite the live DB without --force
+
+
+def _clean_env() -> dict:
+    """The current environment (so installed packages are found, wherever pip put them) minus backup settings."""
+    import os
+
+    skip = ("BACKUP_", "S3_", "AWS_", "DB_PATH")
+    return {k: v for k, v in os.environ.items() if not k.startswith(skip)}
 
 
 # ---- scheduler ----------------------------------------------------------------------------------------------
@@ -516,7 +524,7 @@ def test_fallback_is_used_at_once_on_a_rate_limit(monkeypatch):
 def test_restore_works_when_the_live_database_is_corrupt(tmp_path):
     db = _db(tmp_path)
     target = tmp_path / "bk"
-    env = {"PATH": "/usr/bin:/bin", "DB_PATH": db, "BACKUP_TARGET": str(target), "HOME": str(tmp_path)}
+    env = {**_clean_env(), "DB_PATH": db, "BACKUP_TARGET": str(target)}
     run = lambda *a: subprocess.run([sys.executable, str(ROOT / "scripts" / "backup.py"), *a], env=env, capture_output=True, text=True)  # noqa: E731
     assert run("run").returncode == 0
     Path(db).write_bytes(b"garbage, not sqlite")  # disaster

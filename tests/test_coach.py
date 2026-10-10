@@ -430,3 +430,109 @@ def test_resolve_backends_adds_the_fallback():
                             llm_fallback_model="openai/gpt-oss-120b:free", llm_fallback_api_key="k2")
     assert [b.label for b in resolve_backends(s)] == ["Groq · openai/gpt-oss-120b", "OpenRouter · openai/gpt-oss-120b:free"]
     assert resolve_backends(dataclasses.replace(s, coach_provider="offline")) == []
+
+
+# ---- empty answers (gpt-oss on Groq sometimes reasons and then returns nothing) ---------------------
+@needs_engine
+def test_empty_reply_forces_the_answer_tool(demo_games, demo_bundle):
+    seen = []
+
+    def script(body):
+        if body.get("tool_choice") == {"type": "function", "function": {"name": "final_answer"}}:
+            return _final("Converting wins is costing you most.", next_step="Replay your worst conversion.")
+        return {"role": "assistant", "content": ""}
+
+    r = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
+              http=_llm(script, seen)).chat("what costs me most?")
+    assert r.mode == "agent" and r.answer["summary"] == "Converting wins is costing you most."
+    assert "tool_choice" not in seen[0] and seen[1]["tool_choice"]["function"]["name"] == "final_answer"
+
+
+@needs_engine
+def test_a_model_that_never_answers_falls_back_to_the_built_in_coach(demo_games, demo_bundle):
+    r = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
+              http=_llm(lambda b: {"role": "assistant", "content": ""}, [])).chat("show me my worst blunder")
+    assert r.mode == "fallback" and "empty answer" in r.notice
+    assert "couldn't form an answer" not in r.reply and r.answer["summary"]
+
+
+def test_providers_without_forced_tools_still_work():
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if "tool_choice" in body:
+            return httpx.Response(400, json={"error": {"message": "tool_choice is not supported for this model"}})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    msg = openai_chat(Backend("openai", "m", "http://x/v1", "k"), [], [], httpx.Client(transport=httpx.MockTransport(handler)),
+                      tool_choice={"type": "function", "function": {"name": "final_answer"}})
+    assert msg["content"] == "ok" and len(calls) == 2 and "tool_choice" not in calls[1]
+
+
+# ---- rejected tool calls (Groq "tool_use_failed") are recovered, not shown as an error ------------------
+def _rejected(failed_generation=""):
+    return httpx.Response(400, json={"error": {"message": "Tool call validation failed: parameters for tool final_answer did not match schema",
+                                               "type": "invalid_request_error", "code": "tool_use_failed",
+                                               "failed_generation": failed_generation}})
+
+
+@needs_engine
+def test_rejected_final_answer_is_salvaged(demo_games, demo_bundle):
+    gen = json.dumps({"name": "final_answer", "arguments": {"summary": "Converting wins costs you the most points.", "evidence": "oops"}})
+    coach = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
+                  http=httpx.Client(transport=httpx.MockTransport(lambda r: _rejected(gen))))
+    r = coach.chat("what costs me most?")
+    assert r.mode == "agent" and r.answer["summary"] == "Converting wins costs you the most points." and r.answer["next_step"]
+
+
+@needs_engine
+def test_rejected_prose_is_salvaged(demo_games, demo_bundle):
+    coach = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
+                  http=httpx.Client(transport=httpx.MockTransport(lambda r: _rejected("Your time management is the weakest part of your game right now."))))
+    r = coach.chat("weakness?")
+    assert r.mode == "agent" and r.answer["summary"].startswith("Your time management")
+
+
+@needs_engine
+def test_rejected_call_is_explained_to_the_model_which_then_answers(demo_games, demo_bundle):
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        if any(m["role"] == "user" and m["content"].startswith("Your last tool call was rejected") for m in body["messages"]):
+            return httpx.Response(200, json={"choices": [{"message": _final("Tactics is where to start.")}]})
+        return _rejected('{"name": "search_concepts", "arguments": {"limit": 99}}')  # another tool: can't salvage, so retry
+
+    r = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
+              http=httpx.Client(transport=httpx.MockTransport(handler))).chat("where do I start?")
+    assert r.mode == "agent" and r.answer["summary"] == "Tactics is where to start."
+    note = [m for m in seen[-1]["messages"] if m["role"] == "user"][-1]["content"]
+    assert "did not match schema" in note
+
+
+def test_final_answer_without_next_step_is_accepted():
+    from app.answer import DEFAULT_NEXT_STEP, FINAL_ANSWER_SPEC, parse_answer
+
+    assert parse_answer({"summary": "Your endgames are fine."}).next_step == DEFAULT_NEXT_STEP
+    assert FINAL_ANSWER_SPEC["input_schema"]["required"] == ["summary"]
+
+
+@needs_engine
+def test_reasoning_that_runs_out_of_tokens_is_retried_with_more_room(demo_games, demo_bundle):
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body.get("max_tokens"))
+        if len(seen) == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "", "reasoning": "hmm " * 400},
+                                                          "finish_reason": "length"}], "usage": {"completion_tokens": 2048}})
+        return httpx.Response(200, json={"choices": [{"message": _final("Converting wins is your biggest leak."), "finish_reason": "tool_calls"}]})
+
+    r = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "openai/gpt-oss-120b", "http://x/v1", "k"),
+              http=httpx.Client(transport=httpx.MockTransport(handler))).chat("what costs me most?")
+    assert r.mode == "agent" and r.answer["summary"] == "Converting wins is your biggest leak."
+    assert seen[1] > seen[0]  # the retry had a bigger budget
