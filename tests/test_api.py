@@ -23,9 +23,9 @@ def client(app_mod, email, password="password123", signup=True):
     c = TestClient(app_mod.app)
     c.__enter__()
     first, second = ("signup", "login") if signup else ("login", "signup")
-    r = c.post(f"/api/auth/{first}", json={"email": email, "password": password})
+    r = c.post(f"/api/auth/{first}", json={"email": email, "password": password, "accept_terms": True})
     if r.status_code != 200:
-        r = c.post(f"/api/auth/{second}", json={"email": email, "password": password})
+        r = c.post(f"/api/auth/{second}", json={"email": email, "password": password, "accept_terms": True})
     assert r.status_code == 200, r.text
     return c
 
@@ -41,11 +41,11 @@ def demo_account(c):
 def test_signup_login_logout_flow(app_mod):
     c = TestClient(app_mod.app)
     assert c.get("/api/me").status_code == 401
-    assert c.post("/api/auth/signup", json={"email": "bad", "password": "password123"}).status_code == 400
-    assert c.post("/api/auth/signup", json={"email": "u1@test.com", "password": "short"}).status_code == 400
-    assert c.post("/api/auth/signup", json={"email": "U1@Test.com", "password": "password123"}).status_code == 200
+    assert c.post("/api/auth/signup", json={"email": "bad", "password": "password123", "accept_terms": True}).status_code == 400
+    assert c.post("/api/auth/signup", json={"email": "u1@test.com", "password": "short", "accept_terms": True}).status_code == 400
+    assert c.post("/api/auth/signup", json={"email": "U1@Test.com", "password": "password123", "accept_terms": True}).status_code == 200
     assert c.get("/api/me").json()["email"] == "u1@test.com"  # emails are normalised
-    assert c.post("/api/auth/signup", json={"email": "u1@test.com", "password": "password123"}).status_code == 409
+    assert c.post("/api/auth/signup", json={"email": "u1@test.com", "password": "password123", "accept_terms": True}).status_code == 409
     c.post("/api/auth/logout")
     assert c.get("/api/me").status_code == 401
     assert c.post("/api/auth/login", json={"email": "u1@test.com", "password": "wrongpass1"}).status_code == 401

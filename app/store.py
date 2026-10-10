@@ -143,6 +143,22 @@ CREATE TABLE IF NOT EXISTS assignments (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS assignments_student ON assignments (student_id);
+CREATE TABLE IF NOT EXISTS rate_hits (   -- rate-limit events, shared by every web process
+    bucket  TEXT NOT NULL,
+    key     TEXT NOT NULL,
+    at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rate_hits_lookup ON rate_hits (bucket, key, at);
+CREATE TABLE IF NOT EXISTS audit_log (   -- who did what, for admin and security review
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    at           REAL NOT NULL,
+    actor_id     INTEGER,
+    actor        TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    target       TEXT,
+    detail       TEXT
+);
+CREATE INDEX IF NOT EXISTS audit_at ON audit_log (at);
 CREATE TABLE IF NOT EXISTS kv (
     k          TEXT PRIMARY KEY,
     v          TEXT NOT NULL,
@@ -156,6 +172,7 @@ USER_COLUMNS = {  # added after v0.4; created by _migrate on older databases
     "digest_opt_in": "INTEGER NOT NULL DEFAULT 1",
     "last_digest_at": "REAL",
     "unsubscribe_token": "TEXT",
+    "terms_accepted_at": "REAL",  # agreed to the Terms and Privacy Policy, and confirmed 18+
 }
 
 
@@ -185,6 +202,8 @@ class Store:
         for name, decl in USER_COLUMNS.items():
             if name not in have:
                 c.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")  # names/decls are constants above
+        if "consent_at" not in cols("students"):
+            c.execute("ALTER TABLE students ADD COLUMN consent_at REAL")  # coach confirmed the student (or a parent) agreed
         if "plan" not in cols("upgrade_requests"):
             c.execute("ALTER TABLE upgrade_requests ADD COLUMN plan TEXT NOT NULL DEFAULT 'pro'")
 
@@ -412,7 +431,7 @@ class Store:
             c.execute("UPDATE users SET plan = ?, plan_expires_at = ? WHERE id = ?", (plan, expires_at, user_id))
 
     def update_user(self, user_id: int, **fields) -> None:
-        allowed = {"digest_opt_in", "last_digest_at", "email_verified_at", "pw_hash"}
+        allowed = {"digest_opt_in", "last_digest_at", "email_verified_at", "pw_hash", "terms_accepted_at"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if sets:
             with self._conn() as c:
@@ -453,6 +472,36 @@ class Store:
                 c.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
             c.execute("DELETE FROM users WHERE id = ?", (user_id,))
         return accounts
+
+    def export_user(self, user_id: int) -> dict:
+        """Everything stored about one user, for the "Download my data" button (DPDP / GDPR access request).
+        Secrets (password hash, session and email tokens, unsubscribe token) are left out."""
+        def rows(c, sql, args):
+            return [dict(r) for r in c.execute(sql, args)]
+        accounts = self.accounts(user_id)
+        with self._conn() as c:
+            user = dict(c.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+            for secret in ("pw_hash", "unsubscribe_token"):
+                user.pop(secret, None)
+            out = {"user": user, "accounts": accounts, "games": {}, "puzzles": {}}
+            for a in accounts:
+                key = f"u{a['user_id']}:{a['platform']}:{a['handle'].lower()}"
+                label = f"{a['platform']}-{a['handle']}"
+                out["games"][label] = [json.loads(r["data"]) for r in c.execute("SELECT data FROM games WHERE username = ?", (key,))]
+                out["puzzles"][label] = rows(c, "SELECT * FROM puzzles WHERE username = ?", (key,))
+            out["repertoires"] = rows(c, "SELECT * FROM repertoires WHERE user_id = ?", (user_id,))
+            out["usage"] = rows(c, "SELECT day, kind, count FROM usage WHERE user_id = ? ORDER BY day", (user_id,))
+            out["plan_requests"] = rows(c, "SELECT * FROM upgrade_requests WHERE user_id = ?", (user_id,))
+            out["support_messages"] = rows(c, "SELECT * FROM support_messages WHERE user_id = ?", (user_id,))
+            out["roster"] = rows(c, "SELECT id, account_id, name, note, student_user_id IS NOT NULL AS joined, consent_at, created_at "
+                                    "FROM students WHERE coach_id = ?", (user_id,))
+            out["homework_set"] = rows(c, "SELECT * FROM assignments WHERE coach_id = ?", (user_id,))
+            out["squads_joined"] = rows(c, "SELECT s.id, u.email AS coach_email, s.joined_at FROM students s "
+                                           "JOIN users u ON u.id = s.coach_id WHERE s.student_user_id = ?", (user_id,))
+            out["homework_received"] = rows(c, "SELECT a.* FROM assignments a JOIN students s ON s.id = a.student_id "
+                                               "WHERE s.student_user_id = ?", (user_id,))
+            out["security_log"] = rows(c, "SELECT at, action, target FROM audit_log WHERE actor_id = ? ORDER BY id", (user_id,))
+        return out
 
     def delete_sessions(self, user_id: int, except_hash: str | None = None) -> None:
         with self._conn() as c:
@@ -585,10 +634,11 @@ class Store:
 
     # ---- usage & upgrades ---------------------------------------------------
     # ---- coach: students and homework ------------------------------------------------
-    def add_student(self, coach_id: int, account_id: int, name: str) -> int:
+    def add_student(self, coach_id: int, account_id: int, name: str, consent: bool = False) -> int:
+        now = time.time()
         with self._conn() as c:
-            return c.execute("INSERT INTO students (coach_id, account_id, name, created_at) VALUES (?, ?, ?, ?)",
-                             (coach_id, account_id, name, time.time())).lastrowid
+            return c.execute("INSERT INTO students (coach_id, account_id, name, consent_at, created_at) VALUES (?, ?, ?, ?, ?)",
+                             (coach_id, account_id, name, now if consent else None, now)).lastrowid
 
     def students(self, coach_id: int) -> list[dict]:
         with self._conn() as c:
@@ -666,6 +716,44 @@ class Store:
         with self._conn() as c:
             c.execute("DELETE FROM assignments WHERE id = ?", (assignment_id,))
 
+    # ---- shared rate limits ----------------------------------------------------------------
+    def rate_hit(self, bucket: str, key: str) -> None:
+        now = time.time()
+        with self._conn() as c:
+            c.execute("INSERT INTO rate_hits (bucket, key, at) VALUES (?, ?, ?)", (bucket, key, now))
+            if secrets.randbelow(200) == 0:  # now and then, drop events older than a day
+                c.execute("DELETE FROM rate_hits WHERE at < ?", (now - DAY,))
+
+    def rate_count(self, bucket: str, key: str, since: float) -> int:
+        with self._conn() as c:
+            return c.execute("SELECT COUNT(*) FROM rate_hits WHERE bucket = ? AND key = ? AND at > ?", (bucket, key, since)).fetchone()[0]
+
+    def rate_reset(self, bucket: str, key: str | None = None) -> None:
+        with self._conn() as c:
+            if key is None:
+                c.execute("DELETE FROM rate_hits WHERE bucket = ?", (bucket,))
+            else:
+                c.execute("DELETE FROM rate_hits WHERE bucket = ? AND key = ?", (bucket, key))
+
+    # ---- audit log ----------------------------------------------------------------------
+    def audit(self, actor: str, action: str, target: str | None = None, detail: dict | None = None, actor_id: int | None = None) -> None:
+        with self._conn() as c:
+            c.execute("INSERT INTO audit_log (at, actor_id, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
+                      (time.time(), actor_id, actor, action, target, json.dumps(detail) if detail else None))
+
+    def audit_entries(self, limit: int = 100, actor_id: int | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM audit_log", []
+        if actor_id is not None:
+            sql += " WHERE actor_id = ?"
+            args.append(actor_id)
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        with self._conn() as c:
+            rows = [dict(r) for r in c.execute(sql, args)]
+        for r in rows:
+            r["detail"] = json.loads(r["detail"]) if r["detail"] else None
+        return rows
+
     def usage_today(self, user_id: int, kind: str) -> int:
         with self._conn() as c:
             r = c.execute(
@@ -673,12 +761,12 @@ class Store:
             ).fetchone()
         return r["count"] if r else 0
 
-    def bump_usage(self, user_id: int, kind: str) -> int:
+    def bump_usage(self, user_id: int, kind: str, amount: int = 1) -> int:
         with self._conn() as c:
             c.execute(
-                "INSERT INTO usage (user_id, day, kind, count) VALUES (?, ?, ?, 1) "
-                "ON CONFLICT(user_id, day, kind) DO UPDATE SET count = count + 1",
-                (user_id, _today(), kind),
+                "INSERT INTO usage (user_id, day, kind, count) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, day, kind) DO UPDATE SET count = count + excluded.count",
+                (user_id, _today(), kind, amount),
             )
             return c.execute(
                 "SELECT count FROM usage WHERE user_id = ? AND day = ? AND kind = ?", (user_id, _today(), kind)

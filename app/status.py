@@ -119,8 +119,17 @@ class StatusChecker:
             overall = "ok"
         else:
             overall = "degraded"
+        from .switches import PAUSED_MESSAGES, paused
+
+        try:
+            off = paused(self.store)
+        except Exception:  # noqa: BLE001
+            off = []
+        if off and overall == "ok":
+            overall = "degraded"
         return {"status": overall, "version": self.s.app_version, "uptime_s": round(time.time() - _started),
-                "checked_at": time.time(), "support_email": self.s.support_email, "checks": checks}
+                "checked_at": time.time(), "support_email": self.s.support_email, "checks": checks,
+                "paused": [{"name": n, "message": PAUSED_MESSAGES.get(n, f"{n} is paused.")} for n in off]}
 
 
     def email_check(self) -> dict:

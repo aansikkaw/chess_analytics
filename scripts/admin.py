@@ -5,11 +5,15 @@
   python scripts/admin.py grant EMAIL              switch a user to Pro
   python scripts/admin.py grant EMAIL --days 10    Pro for 10 days (an Event Pass); back to Free afterwards
   python scripts/admin.py grant EMAIL --plan coach Coach plan: Pro plus the dashboard for up to 20 students
+                                                   (grant emails the user; add --no-email to skip that)
   python scripts/admin.py revoke EMAIL             switch a user back to Free
   python scripts/admin.py support                  list recent support messages
   python scripts/admin.py jobs                     queue status
   python scripts/admin.py email                    how this server sends email, and what's wrong with the settings
   python scripts/admin.py test-email YOU@EXAMPLE   send a test email now; if it fails, says what to change
+  python scripts/admin.py switch                   show the kill switches (ai_coach, imports, signups, chesscom, emails)
+  python scripts/admin.py switch ai_coach off      pause one part of the service (on to resume); no redeploy needed
+  python scripts/admin.py audit [N]                the last N (default 50) admin, roster, account and data actions
 """
 
 from __future__ import annotations
@@ -21,9 +25,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.config import load_settings  # noqa: E402
 from app.jobs import JobQueue  # noqa: E402
-from app.mailer import MailError, Mailer  # noqa: E402
+from app.mailer import MailError, Mailer, plan_granted_email  # noqa: E402
 from app.plans import effective_plan  # noqa: E402
 from app.store import Store  # noqa: E402
+from app import switches  # noqa: E402
 
 
 def _day(ts: float | None) -> str:
@@ -82,6 +87,24 @@ def main(argv: list[str]) -> int:
             return 1
         print(f"\n✓ Sent. Check {argv[1]} (and the spam folder). The status page now shows Email as Working.")
         return 0
+    if cmd == "switch":
+        if len(argv) == 1:
+            for name, label in switches.SWITCHES.items():
+                print(f"{'on ' if switches.is_on(store, name) else 'OFF'}  {name:<9} {label}")
+            return 0
+        if len(argv) < 3 or argv[1] not in switches.SWITCHES or argv[2].lower() not in ("on", "off"):
+            print(f"Usage: python scripts/admin.py switch NAME on|off   (names: {', '.join(switches.SWITCHES)})")
+            return 1
+        on = argv[2].lower() == "on"
+        switches.set_switch(store, argv[1], on, actor="cli")
+        print(f"{argv[1]} is now {'on' if on else 'OFF'}. Every server picks this up within {switches.CACHE_S:g} seconds.")
+        return 0
+    if cmd == "audit":
+        n = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 50
+        for r in reversed(store.audit_entries(n)):
+            detail = f"  {r['detail']}" if r["detail"] else ""
+            print(f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(r['at']))}  {r['actor']:<28} {r['action']:<16} {r['target'] or ''}{detail}")
+        return 0
     if cmd in ("grant", "revoke") and len(argv) >= 2:
         user = store.user_by_email(argv[1].strip().lower())
         if not user:
@@ -89,6 +112,7 @@ def main(argv: list[str]) -> int:
             return 1
         if cmd == "revoke":
             store.set_plan(user["id"], "free")
+            store.audit("cli", "plan_revoked", user["email"])
             print(f"{user['email']} is now on Free.")
             return 0
         days = None
@@ -105,7 +129,19 @@ def main(argv: list[str]) -> int:
                 print("--plan must be pro or coach")
                 return 1
         store.set_plan(user["id"], plan, time.time() + days * 86_400 if days else None)
-        print(f"{user['email']} is now on {plan.capitalize()}" + (f" for {days:g} days (until {_day(time.time() + days * 86_400)})." if days else "."))
+        store.audit("cli", "plan_granted", user["email"], {"plan": plan, "days": days})
+        until = _day(time.time() + days * 86_400) if days else None
+        print(f"{user['email']} is now on {plan.capitalize()}" + (f" for {days:g} days (until {until})." if days else "."))
+        if "--no-email" not in argv:
+            mailer = Mailer(settings, store)
+            subject, text, html = plan_granted_email("Coach" if plan == "coach" else "Pro", settings.public_url, until)
+            if not mailer.configured:
+                mailer.send(user["email"], subject, text, html)
+                print(f"Email isn't set up, so the 'your plan is on' email was saved to {mailer.outbox}/ instead.")
+            elif mailer.send(user["email"], subject, text, html):
+                print(f"Emailed {user['email']} that their plan is on.")
+            else:
+                print("Couldn't send the 'your plan is on' email: run python scripts/admin.py test-email YOU@EXAMPLE to see why.")
         return 0
     print(__doc__)
     return 1

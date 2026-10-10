@@ -65,6 +65,7 @@ class Settings:
     smtp_from: str | None = None  # EMAIL_FROM (or SMTP_FROM): the address emails come from
     smtp_security: str = "starttls"  # starttls | ssl | none (defaults to ssl on port 465)
     require_verified_email: bool = False  # if on, unverified users can't sync or ask the coach
+    require_terms: bool = True  # new accounts must tick "I'm 18+ and agree to the Terms and Privacy Policy"
     llm_fallback_base_url: str | None = None  # a second OpenAI-compatible provider, tried when the first fails
     llm_fallback_api_key: str | None = None
     llm_fallback_model: str | None = None
@@ -76,7 +77,7 @@ class Settings:
     plausible_src: str = "https://plausible.io/js/script.tagged-events.js"
     posthog_key: str | None = None
     posthog_host: str = "https://eu.i.posthog.com"
-    app_version: str = "0.6.0"
+    app_version: str = "0.7.0"
 
 
 def _public_url() -> str:
@@ -133,6 +134,7 @@ def load_settings() -> Settings:
         smtp_from=(os.getenv("EMAIL_FROM") or os.getenv("SMTP_FROM") or "").strip() or None,
         smtp_security=(os.getenv("SMTP_SECURITY") or ("ssl" if smtp_port == 465 else "starttls")).strip().lower(),
         require_verified_email=os.getenv("REQUIRE_EMAIL_VERIFICATION", "0") == "1",
+        require_terms=os.getenv("REQUIRE_TERMS", "1") == "1",
         llm_fallback_base_url=(os.getenv("LLM_FALLBACK_BASE_URL") or "").rstrip("/") or None,
         llm_fallback_api_key=os.getenv("LLM_FALLBACK_API_KEY") or None,
         llm_fallback_model=os.getenv("LLM_FALLBACK_MODEL") or None,

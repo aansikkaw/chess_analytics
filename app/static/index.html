@@ -91,7 +91,7 @@
   <footer class="lp-foot">
     <div class="wrap">
       <a class="brand" href="/"><span class="rook" aria-hidden="true">♜&#xFE0E;</span>Plateau Breaker</a>
-      <nav aria-label="Footer"><a href="/status">Service status</a><button class="link quiet" type="button" data-support>Contact support</button></nav>
+      <nav aria-label="Footer"><a href="/status">Service status</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/refunds">Refunds</a><button class="link quiet" type="button" data-support>Contact support</button></nav>
     </div>
   </footer>
 </div>
@@ -120,6 +120,7 @@
       <a href="#/plans" data-area="plans">Plans</a>
       <a href="/status">Service status</a>
       <a href="#" data-support>Contact support</a>
+      <a href="/privacy" class="tiny-link">Privacy · Terms</a>
     </div>
   </nav>
   <main class="main" id="view" tabindex="-1"></main>
@@ -134,6 +135,8 @@
       <div class="field"><label for="authEmail">Email</label><input id="authEmail" type="email" autocomplete="email" required></div>
       <div class="field" id="authPwField"><label for="authPw">Password</label><input id="authPw" type="password" autocomplete="current-password" minlength="8" required>
         <span class="tiny faint" id="pwHint" hidden>At least 8 characters.</span></div>
+      <label class="check consent" id="authTermsField" hidden><input type="checkbox" id="authTerms">
+        <span>I'm 18 or over and agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a> and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</span></label>
       <button class="btn" id="authBtn" type="submit">Sign in</button>
       <p id="authErr" class="err" role="alert" hidden></p>
       <p id="authOk" class="small ok-text" role="status" hidden></p>

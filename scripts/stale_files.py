@@ -17,11 +17,14 @@ SKIP_SUFFIXES = (".db", ".db-wal", ".db-shm", ".zip", ".log")
 RELEASE = set("""
 .devcontainer/devcontainer.json
 .dockerignore
+.github/dependabot.yml
+.github/workflows/ci.yml
 .gitignore
 DEPLOY.md
 Dockerfile
 README.md
 REVIEW.md
+RUNBOOK.md
 app/__init__.py
 app/analysis.py
 app/answer.py
@@ -48,6 +51,7 @@ app/knowledge/principles/middlegame-planning.md
 app/knowledge/principles/opening-principles.md
 app/knowledge/principles/repertoire-maintenance.md
 app/knowledge/principles/rook-endgames.md
+app/legal.py
 app/llm.py
 app/mailer.py
 app/main.py
@@ -114,11 +118,13 @@ app/static/vendor/chess.js
 app/static/vendor/chess.js.LICENSE
 app/status.py
 app/store.py
+app/switches.py
 app/sync.py
 app/worker.py
 deploy/.env.example
 deploy/Caddyfile
 deploy/docker-compose.yml
+deploy/loadtest/locustfile.py
 deploy/setup-vps.sh
 deploy/systemd/plateau-scheduler.service
 deploy/systemd/plateau-web.service
@@ -126,6 +132,7 @@ deploy/systemd/plateau-worker.service
 pyproject.toml
 requirements-dev.txt
 requirements-prod.txt
+requirements.lock
 requirements.txt
 sample_data/demo_games.pgn
 scripts/admin.py
@@ -147,6 +154,7 @@ tests/test_okf.py
 tests/test_ops.py
 tests/test_prep.py
 tests/test_pro.py
+tests/test_production.py
 tests/test_sources.py
 """.split())
 

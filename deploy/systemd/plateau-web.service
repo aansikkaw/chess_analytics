@@ -11,7 +11,7 @@ User=plateau
 WorkingDirectory=/opt/plateau
 EnvironmentFile=/etc/plateau.env
 Environment=JOB_MODE=external
-ExecStart=/opt/plateau/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+ExecStart=/opt/plateau/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
 Restart=always
 RestartSec=3
 

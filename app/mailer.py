@@ -168,7 +168,7 @@ class Mailer:
     def _send(self, mail: Email) -> MailError | None:
         with self._lock:
             self.sent.append({"to": mail.to, "subject": mail.subject, "text": mail.text, "at": time.time()})
-        if not self.configured:
+        if not self.configured or self._paused():
             self._write_outbox(self._mime(mail), mail.subject)
             return None
         try:
@@ -181,6 +181,13 @@ class Mailer:
             return exc
         self._record(True)
         return None
+
+    def _paused(self) -> bool:
+        if self.store is None:
+            return False
+        from .switches import is_on
+
+        return not is_on(self.store, "emails")
 
     def deliver(self, mail: Email) -> None:
         """Send one email now, or raise MailError explaining why it couldn't be sent."""
@@ -432,6 +439,32 @@ def reset_email(link: str) -> tuple[str, str, str]:
                  ("Choose a new password", link),
                  "The link works for one hour and only once. If you didn't ask, ignore this email: your password hasn't changed.")
     return "Reset your password", text, html
+
+
+def plan_request_email(plan_name: str) -> tuple[str, str, str]:
+    text = (f"Thanks for choosing {plan_name} on {BRAND}.\n\nPayments aren't switched on yet, so we turn plans on by hand, "
+            "usually within a day. You'll get another email the moment it's on.")
+    html = _html(f"We got your {plan_name} request", [f"Thanks for choosing {escape(plan_name)}.",
+                 "Payments aren't switched on yet, so we turn plans on by hand, usually within a day. "
+                 "You'll get another email the moment it's on."])
+    return f"We got your {plan_name} request", text, html
+
+
+def plan_request_admin_email(user_email: str, plan_name: str, command: str, note: str | None) -> tuple[str, str]:
+    text = (f"{user_email} asked for {plan_name}.{f' Note: {note}' if note else ''}\n\nTo switch it on, run this where the app runs:\n\n"
+            f"    {command}\n\nThey'll get an email automatically. All requests: python scripts/admin.py requests")
+    return f"[Plans] {user_email} wants {plan_name}", text
+
+
+def plan_granted_email(plan_name: str, app_url: str, until: str | None = None) -> tuple[str, str, str]:
+    extra = {"Coach": "Open Students in the menu to add your first student. You can coach up to 20, and each one you invite gets Pro free.",
+             "Pro": "Prep Check, Opponent Scout, Repertoire Leaks, Progress and Auto-sync are all unlocked, with up to 500 games per sync."}
+    detail = extra.get(plan_name, "")
+    when = f" until {until}" if until else ""
+    text = f"Your {plan_name} plan on {BRAND} is on{when}.\n\n{detail}\n\nOpen the app: {app_url}"
+    html = _html(f"Your {plan_name} plan is on", [f"Your {escape(plan_name)} plan is on{escape(when)}.", escape(detail)],
+                 ("Open Plateau Breaker", app_url))
+    return f"Your {plan_name} plan is on", text, html
 
 
 def coach_invite_email(coach_email: str, student_name: str, link: str) -> tuple[str, str, str]:

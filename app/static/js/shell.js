@@ -405,16 +405,45 @@ function openMe() {
           catch (ex) { toast(ex.message); }
         } })))) : null,
     el("div", { class: "stack" }, el("h3", { text: "Email" }), el("label", { class: "check" }, digest, "Send me a weekly summary of my games")),
-    S.me.is_admin ? emailSetupPanel() : null,
+    el("div", { class: "stack" }, el("h3", { text: "Your data" }),
+      el("p", { class: "small muted", text: "Download everything we hold about you: account, games, puzzles, coaching and activity, as JSON files in a zip." }),
+      el("div", { class: "row" }, el("a", { class: "btn quiet small", href: "/api/me/export", download: "", text: "Download my data" }),
+        el("a", { class: "btn quiet small", href: "/privacy", target: "_blank", rel: "noopener", text: "Privacy policy" }))),
     el("div", { class: "stack" }, el("h3", { text: "Help" }),
       el("div", { class: "row" }, el("button", { class: "btn quiet small", type: "button", text: "Contact support", onclick: () => { $("#meDlg").close(); openSupport(); } }),
         el("a", { class: "btn quiet small", href: "/status", text: "Service status" }))),
+    S.me.is_admin ? emailSetupPanel() : null,
+    S.me.is_admin ? switchesPanel() : null,
     el("div", { class: "row" }, el("button", { class: "btn quiet", type: "button", text: "Sign out", onclick: async () => {
       await post("/api/auth/logout").catch(() => {}); $("#meDlg").close(); signOutCb && signOutCb();
     } })),
     el("details", { class: "stack" }, el("summary", { class: "small muted", text: "Delete account" }),
       el("p", { class: "small muted", text: "This deletes your account, linked accounts, analysed games, puzzles, repertoires and knowledge bundles. It can't be undone." }), delForm));
   openDialog($("#meDlg"));
+}
+
+// Owner only: kill switches (pause a failing part without redeploying) and the latest audit log entries.
+function switchesPanel() {
+  const box = el("div", { class: "stack owner-panel" }, el("h3", { text: "Service switches (owner only)" }),
+    el("p", { class: "small muted", text: "Pause one part of the service without a redeploy. Changes reach every server within seconds and show on the status page." }));
+  const list = el("div", { class: "switch-list" }, el("p", { class: "small muted", text: "Loading…" }));
+  const log = el("ol", { class: "audit-list small" });
+  box.append(list, el("details", {}, el("summary", { class: "small", text: "Recent admin and account activity" }), log));
+  const draw = (rows) => list.replaceChildren(...rows.map((sw) => {
+    const box2 = el("input", { type: "checkbox", id: `sw-${sw.name}` });
+    box2.checked = sw.on;
+    box2.addEventListener("change", async () => {
+      try { await post(`/api/admin/switches/${sw.name}`, { on: box2.checked }); toast(`${sw.label}: ${box2.checked ? "on" : "paused"}.`); loadLog(); }
+      catch (e) { box2.checked = !box2.checked; toast(e.message); }
+    });
+    return el("label", { class: "check", for: `sw-${sw.name}` }, box2, sw.label);
+  }));
+  const loadLog = () => api("/api/admin/audit?limit=15").then((rows) => log.replaceChildren(...(rows.length ? rows.map((r) =>
+    el("li", {}, el("span", { class: "faint", text: `${new Date(r.at * 1000).toLocaleString()} ` }), `${r.actor} · ${r.action.replaceAll("_", " ")}${r.target ? ` · ${r.target}` : ""}`))
+    : [el("li", { class: "muted", text: "Nothing yet." })]))).catch(() => {});
+  api("/api/admin/switches").then(draw).catch((e) => list.replaceChildren(el("p", { class: "err", text: e.message })));
+  loadLog();
+  return box;
 }
 
 // Owner only: how this server sends email, what's wrong with the settings, and a test button.

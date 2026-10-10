@@ -457,8 +457,8 @@ def test_signup_is_rate_limited_per_ip(m, monkeypatch):
     monkeypatch.setattr(m, "signup_limiter", m.auth.LoginLimiter(limit=2, window=3600))
     c = TestClient(m.app)
     for i in range(2):
-        c.post("/api/auth/signup", json={"email": f"flood{i}@test.com", "password": "password123"})
-    assert c.post("/api/auth/signup", json={"email": "flood9@test.com", "password": "password123"}).status_code == 429
+        c.post("/api/auth/signup", json={"email": f"flood{i}@test.com", "password": "password123", "accept_terms": True})
+    assert c.post("/api/auth/signup", json={"email": "flood9@test.com", "password": "password123", "accept_terms": True}).status_code == 429
 
 
 def test_static_cache_headers(m):

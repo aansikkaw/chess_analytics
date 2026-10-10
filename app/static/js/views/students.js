@@ -106,6 +106,7 @@ function addStudent(d) {
   const platform = el("select", { id: "stPlat" }, ...(S.config.platforms || ["lichess"]).map((p) => el("option", { value: p, text: PLATFORM[p] })),
     el("option", { value: "pgn", text: "ChessBase / PGN (over-the-board)" }));
   const handle = el("input", { type: "text", id: "stHandle", maxlength: "60", autocomplete: "off", autocapitalize: "off", spellcheck: "false", required: true });
+  const consent = el("input", { type: "checkbox", id: "stConsent" });
   const err = el("p", { class: "err", role: "alert", hidden: true });
   const btn = el("button", { class: "btn", type: "submit", text: "Add and analyse" });
   const form = el("form", { class: "stack" },
@@ -113,14 +114,17 @@ function addStudent(d) {
     el("div", { class: "field" }, el("label", { for: "stPlat", text: "Where they play" }), platform),
     el("div", { class: "field" }, el("label", { for: "stHandle", text: "Their username" }), handle,
       el("span", { class: "tiny faint", text: `We analyse up to ${d.games_per_student} of their recent rated games. Only public games are read.` })),
+    el("label", { class: "check consent", for: "stConsent" }, consent,
+      el("span", { text: "This student (or their parent or guardian, if they're under 18) has agreed to me analysing their games here." })),
     btn, err);
   platform.addEventListener("change", () => { btn.textContent = platform.value === "pgn" ? "Add" : "Add and analyse"; });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     showErr(err, "");
+    if (!consent.checked) { showErr(err, "Please confirm the student (or their parent or guardian) has agreed."); return; }
     btn.disabled = true;
     try {
-      const s = await post("/api/coach/students", { name: name.value.trim(), platform: platform.value, handle: handle.value.trim() });
+      const s = await post("/api/coach/students", { name: name.value.trim(), platform: platform.value, handle: handle.value.trim(), consent: true });
       track("Student added", { platform: s.platform });
       $("#studentDlg").close();
       await refreshMe();

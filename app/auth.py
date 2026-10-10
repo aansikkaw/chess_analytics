@@ -92,3 +92,30 @@ class LoginLimiter:
     def reset(self, ip: str) -> None:
         with self._lock:
             self._hits.pop(ip, None)
+
+
+class SharedLimiter(LoginLimiter):
+    """The same limits, counted in the database, so every web process (and restarts) share one count.
+    Without this, running two web processes would quietly double every limit."""
+
+    def __init__(self, store, bucket: str, limit: int = 10, window: float = 600):
+        super().__init__(limit, window)
+        self.store, self.bucket = store, bucket
+        self._hits = _BucketClearer(self)  # tests and admin tools call ._hits.clear()
+
+    def blocked(self, key: str) -> bool:
+        return self.store.rate_count(self.bucket, key, time.time() - self.window) >= self.limit
+
+    def fail(self, key: str) -> None:
+        self.store.rate_hit(self.bucket, key)
+
+    def reset(self, key: str) -> None:
+        self.store.rate_reset(self.bucket, key)
+
+
+class _BucketClearer:
+    def __init__(self, limiter: SharedLimiter):
+        self.limiter = limiter
+
+    def clear(self) -> None:
+        self.limiter.store.rate_reset(self.limiter.bucket)

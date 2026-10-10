@@ -1,0 +1,70 @@
+# Runs on every push and pull request: lint, the full test suite (with real Stockfish), a dependency
+# vulnerability scan, and a check that the production image builds. Protect `main` in GitHub
+# (Settings → Branches → Add rule → "Require status checks to pass") so nothing merges red.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install Stockfish
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends stockfish
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Lint (ruff)
+        run: ruff check app scripts tests
+      - name: Front-end syntax
+        run: for f in app/static/js/*.js app/static/js/views/*.js app/static/sw.js; do node --check "$f"; done
+      - name: Tests
+        env:
+          STOCKFISH_PATH: /usr/games/stockfish
+        run: python -m pytest -q
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scan pinned dependencies for known vulnerabilities
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.lock --require-hashes --disable-pip
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production image
+        run: docker build -t plateau-breaker:ci .
+      - name: Smoke-test the image
+        run: |
+          docker run -d --name pb -p 8000:8000 -e COOKIE_SECURE=0 plateau-breaker:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/api/health && exit 0; sleep 2; done
+          docker logs pb; exit 1

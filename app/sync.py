@@ -372,6 +372,10 @@ class AutoSync(threading.Thread):
 
     def sync_all(self) -> int:
         queued = 0
+        from .switches import is_on
+
+        if not is_on(self.store, "imports"):
+            return 0
         for acct in self.store.auto_sync_accounts():
             if self._stop.is_set():
                 break

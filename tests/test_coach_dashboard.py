@@ -113,7 +113,7 @@ def test_dashboard_is_for_coaches_only(m):
     with client(m, "not-a-coach@test.com") as c:
         r = c.get("/api/coach/students")
         assert r.status_code == 402 and r.json()["detail"]["upgrade"] is True
-        assert c.post("/api/coach/students", json={"name": "A", "platform": "lichess", "handle": "abc"}).status_code == 402
+        assert c.post("/api/coach/students", json={"name": "A", "platform": "lichess", "handle": "abc", "consent": True}).status_code == 402
 
 
 @needs_engine
@@ -122,9 +122,9 @@ def test_coach_roster_heatmap_invite_and_homework(m, monkeypatch):
     monkeypatch.setattr("app.sync.fetch_games", lambda platform, handle, n, classes, since=None: parse_pgn(DEMO, "demo_player")[:n])
     with _coach(m, "coach1@test.com") as coach:
         assert coach.get("/api/me").json()["plan"] == "coach"
-        s = coach.post("/api/coach/students", json={"name": "Riya", "platform": "lichess", "handle": "demo_player"}).json()
+        s = coach.post("/api/coach/students", json={"name": "Riya", "platform": "lichess", "handle": "demo_player", "consent": True}).json()
         assert s["name"] == "Riya" and s["handle"] == "demo_player"
-        assert coach.post("/api/coach/students", json={"name": "Again", "platform": "lichess", "handle": "demo_player"}).status_code == 409
+        assert coach.post("/api/coach/students", json={"name": "Again", "platform": "lichess", "handle": "demo_player", "consent": True}).status_code == 409
         board = coach.get("/api/coach/students").json()
         row = board["students"][0]
         assert row["games"] > 0 and row["base_rating"] and row["skills"] and board["max_students"] == 20
@@ -187,8 +187,8 @@ def test_roster_is_capped(m, monkeypatch):
     monkeypatch.setattr("app.main.check_account", lambda platform, name: name)
     monkeypatch.setitem(PLANS["coach"], "max_students", 1)
     with _coach(m, "coach-cap@test.com") as c:
-        assert c.post("/api/coach/students", json={"name": "One", "platform": "pgn", "handle": "Player One"}).status_code == 200
-        r = c.post("/api/coach/students", json={"name": "Two", "platform": "pgn", "handle": "Player Two"})
+        assert c.post("/api/coach/students", json={"name": "One", "platform": "pgn", "handle": "Player One", "consent": True}).status_code == 200
+        r = c.post("/api/coach/students", json={"name": "Two", "platform": "pgn", "handle": "Player Two", "consent": True})
         assert r.status_code == 402 and "room for 1" in r.json()["detail"]["message"]
 
 
@@ -205,3 +205,53 @@ def test_coach_join_page_and_admin_grant(m, capsys):
     assert "now on Coach" in capsys.readouterr().out
     assert effective_plan(m.store.user_by_email("grant-coach@test.com")) == "coach"
     assert admin.main(["grant", "grant-coach@test.com", "--plan", "gold"]) == 1
+
+
+@needs_engine
+def test_asking_for_more_games_goes_back_through_history(m, monkeypatch):
+    import dataclasses
+
+    calls = []
+
+    def fake_fetch(platform, handle, n, classes, since=None):
+        calls.append({"n": n, "since": since})
+        return parse_pgn(DEMO, "demo_player")[:n]
+    monkeypatch.setattr("app.main.check_account", lambda platform, name: name)
+    monkeypatch.setattr("app.sync.fetch_games", fake_fetch)
+    monkeypatch.setattr(m, "settings", dataclasses.replace(m.settings, max_games=6))
+    with client(m, "backfill@test.com") as c:
+        m.store.set_plan(m.store.user_by_email("backfill@test.com")["id"], "pro")
+        a = c.post("/api/accounts", json={"platform": "lichess", "handle": "demo_player"}).json()
+        c.post(f"/api/accounts/{a['id']}/sync", json={"max_games": 3})
+        assert calls[-1] == {"n": 3, "since": None} and m.store.count_games(m.player_key(m.store.account(a["id"]))) == 3
+        j = c.post(f"/api/accounts/{a['id']}/sync", json={"max_games": 3}).json()  # no more than we have: just new games
+        assert calls[-1]["since"] is not None
+        assert c.get(f"/api/jobs/{j['job_id']}").json()["found"] == 3
+        c.post(f"/api/accounts/{a['id']}/sync", json={"max_games": 6})  # more than we have: back through history
+        assert calls[-1] == {"n": 6, "since": None}
+        assert m.store.count_games(m.player_key(m.store.account(a["id"]))) == 6
+
+
+def test_plan_requests_and_grants_send_emails(m, capsys, tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    with client(m, "wants-coach@test.com") as c:
+        r = c.post("/api/upgrade-request", json={"plan": "coach", "note": "I run an academy"}).json()
+        assert r["ok"]
+    to_user = [x for x in m.mailer.sent if x["to"] == "wants-coach@test.com" and "Coach plan request" in x["subject"]]
+    to_owner = [x for x in m.mailer.sent if x["to"] == "admin@test.com" and "wants-coach@test.com wants" in x["subject"]]
+    assert to_user and to_owner
+    assert "python scripts/admin.py grant wants-coach@test.com --plan coach" in to_owner[-1]["text"]
+    assert "I run an academy" in to_owner[-1]["text"]
+
+    spec = importlib.util.spec_from_file_location("admin_grant_mail", Path(__file__).resolve().parent.parent / "scripts" / "admin.py")
+    admin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(admin)
+    assert admin.main(["grant", "wants-coach@test.com", "--plan", "coach"]) == 0
+    out = capsys.readouterr().out
+    assert "now on Coach" in out and "saved to" in out  # email isn't set up in tests: it goes to outbox/
+    outbox = Path(m.settings.db_path).resolve().parent / "outbox"
+    assert any("your-coach-plan-is-on" in f.name for f in outbox.glob("*.eml"))
+    assert admin.main(["grant", "wants-coach@test.com", "--plan", "coach", "--no-email"]) == 0
+    assert "saved to" not in capsys.readouterr().out

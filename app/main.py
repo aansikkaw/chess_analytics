@@ -10,17 +10,21 @@ Engine-heavy work (imports, Prep Checks, previews) goes through the job queue (a
 from __future__ import annotations
 
 import io
+import json
 import logging
+import os
 from html import escape as html_escape
 import time
+import uuid
 import zipfile
+from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import chess
 import chess.engine
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -32,7 +36,8 @@ from .engine import Engine, EngineUnavailable
 from .games import TIME_CLASSES, GameImportError, decode_upload, name_matches, player_names, validate_pgn_name, validate_username
 from .jobs import JobQueue
 from .llm import resolve_backends
-from .mailer import MailError, Mailer, coach_invite_email, reset_email, support_email, verification_email
+from .mailer import (MailError, Mailer, coach_invite_email, plan_request_admin_email, plan_request_email, reset_email, support_email,
+                     verification_email)
 from .observability import analytics_config, capture_client_error, init_sentry, sentry_enabled
 from .plans import (EVENT_PASS_DAYS, FEATURE_NAMES, OFFER_IDS, PLANS, admin_emails, effective_plan, has_feature, is_coach, is_pro, plan_of,
                     public_plans)
@@ -43,10 +48,13 @@ from .progress import progress_report
 from .repertoire import repertoire_report
 from .scout import scout_report
 from .sources import check_account, fetch_games
+from . import legal, switches
 from .status import CoachStats, StatusChecker
 from .store import Store
 from .sync import DEMO_HANDLE, DEMO_PGN, KNOWLEDGE_DIR, AutoSync, Importer, Jobs, player_key
 
+if not logging.getLogger().handlers:  # uvicorn configures only its own loggers; give ours a home too
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("plateau")
 STATIC = Path(__file__).parent / "static"
 ALSO_GOOD_WIN_PCT = 3.0
@@ -62,15 +70,24 @@ queue = JobQueue(settings.db_path)
 jobs = Jobs(queue, importer, settings)
 mailer = Mailer(settings, store)
 coach_stats = CoachStats()
-login_limiter = auth.LoginLimiter()
-preview_limiter = auth.LoginLimiter(limit=settings.previews_per_hour, window=3600)
-forgot_limiter = auth.LoginLimiter(limit=5, window=3600)
-support_limiter = auth.LoginLimiter(limit=5, window=3600)
-client_error_limiter = auth.LoginLimiter(limit=30, window=600)
-resend_limiter = auth.LoginLimiter(limit=3, window=3600)
-analyse_limiter = auth.LoginLimiter(limit=240, window=3600)  # engine look-ups from Explore, per user
-signup_limiter = auth.LoginLimiter(limit=settings.signups_per_hour, window=3600)
-test_email_limiter = auth.LoginLimiter(limit=10, window=3600)
+login_limiter = auth.SharedLimiter(store, "login")
+preview_limiter = auth.SharedLimiter(store, "preview", limit=settings.previews_per_hour, window=3600)
+forgot_limiter = auth.SharedLimiter(store, "forgot", limit=5, window=3600)
+support_limiter = auth.SharedLimiter(store, "support", limit=5, window=3600)
+client_error_limiter = auth.SharedLimiter(store, "client_error", limit=30, window=600)
+resend_limiter = auth.SharedLimiter(store, "resend", limit=3, window=3600)
+analyse_limiter = auth.SharedLimiter(store, "analyse", limit=240, window=3600)  # engine look-ups from Explore, per user
+signup_limiter = auth.SharedLimiter(store, "signup", limit=settings.signups_per_hour, window=3600)
+test_email_limiter = auth.SharedLimiter(store, "test_email", limit=10, window=3600)
+export_limiter = auth.SharedLimiter(store, "export", limit=5, window=3600)
+
+
+def audit(user: dict | None, action: str, target: str | None = None, **detail) -> None:
+    """Record who did what (admin, roster, account and data actions). Never lets a logging problem break the request."""
+    try:
+        store.audit(user["email"] if user else "system", action, target, detail or None, user["id"] if user else None)
+    except Exception:  # noqa: BLE001
+        log.exception("audit write failed: %s %s", action, target)
 DUMMY_HASH = auth.hash_password("timing-equaliser-not-a-real-password")
 state: dict = {"engine": None, "engine_error": None, "autosync": None}
 status_checker = StatusChecker(settings, store, jobs, mailer, coach_stats, state, lambda: resolve_backends(settings))
@@ -132,6 +149,32 @@ def _csp() -> str:
 CSP = _csp()
 
 
+WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+access_log = logging.getLogger("plateau.access")
+
+
+def _same_origin(origin: str, request: Request) -> bool:
+    """Is a browser's Origin header this site? Matches PUBLIC_URL, or the host the request came in on."""
+    o = urlparse(origin)
+    if not o.scheme or not o.netloc:
+        return False
+    if origin.rstrip("/") == settings.public_url:
+        return True
+    hosts = {request.headers.get("host", ""), request.headers.get("x-forwarded-host", "")} - {""}
+    return o.netloc in hosts
+
+
+@app.middleware("http")
+async def same_origin_writes(request: Request, call_next):
+    """CSRF defence on top of SameSite cookies: a browser on another site can't make us change anything.
+    Browsers always send Origin (and Sec-Fetch-Site) on cross-site writes; tools like curl send neither."""
+    if request.method in WRITE_METHODS and request.url.path.startswith("/api/"):
+        origin = request.headers.get("origin")
+        if request.headers.get("sec-fetch-site") == "cross-site" or (origin and origin != "null" and not _same_origin(origin, request)):
+            return JSONResponse({"detail": "Requests from other websites aren't allowed."}, status_code=403)
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
@@ -150,6 +193,38 @@ async def security_headers(request: Request, call_next):
         # JS/CSS URLs aren't versioned, so browsers must check for a new copy (a cheap 304) after every deploy.
         resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+@app.middleware("http")
+async def request_ids(request: Request, call_next):
+    """Every response carries an X-Request-ID, and every request gets one log line (JSON) with the same ID,
+    so a support email quoting the ID leads straight to the log line and the Sentry event."""
+    rid = (request.headers.get("x-request-id") or "")[:64] or uuid.uuid4().hex[:12]
+    request.state.rid = rid
+    start = time.perf_counter()
+    try:
+        resp = await call_next(request)
+    except Exception:  # noqa: BLE001 - an unhandled error: answer with the reference instead of a bare 500
+        access_log.exception("request failed rid=%s", rid)
+        report_exception(rid)
+        resp = JSONResponse({"detail": f"Something went wrong on our side. If it keeps happening, contact support and quote {rid}.",
+                             "request_id": rid}, status_code=500)
+    resp.headers["X-Request-ID"] = rid
+    path = request.url.path  # never the query string: it can hold one-time tokens
+    if not path.startswith(("/static/", "/api/health")):
+        access_log.info(json.dumps({"rid": rid, "method": request.method, "path": path, "status": resp.status_code,
+                                    "ms": round((time.perf_counter() - start) * 1000, 1)}))
+    return resp
+
+
+def report_exception(rid: str) -> None:
+    try:
+        import sentry_sdk
+
+        sentry_sdk.set_tag("request_id", rid)
+        sentry_sdk.capture_exception()
+    except ImportError:
+        pass
 
 
 # ---- helpers ----------------------------------------------------------------------
@@ -216,6 +291,13 @@ def spend(user: dict, kind: str, limit: int) -> None:
 def platform_allowed(platform: str) -> None:
     if platform == "chesscom" and not settings.chesscom_enabled:
         raise HTTPException(400, "Chess.com import isn't available on this server yet. Use Lichess or paste a PGN.")
+    if platform == "chesscom" and not switches.is_on(store, "chesscom"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["chesscom"])
+
+
+def imports_allowed() -> None:
+    if not switches.is_on(store, "imports"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["imports"])
 
 
 def games_cap(user: dict) -> int:
@@ -264,6 +346,7 @@ def send_verification(user_id: int, email: str, background: BackgroundTasks) -> 
 class Credentials(BaseModel):
     email: str = Field(..., max_length=260)
     password: str = Field(..., max_length=200)
+    accept_terms: bool = False  # sign-up only: "I'm 18 or over and agree to the Terms and Privacy Policy"
 
 
 class EmailOnly(BaseModel):
@@ -363,19 +446,25 @@ class ClientError(BaseModel):
 @app.post("/api/auth/signup")
 def signup(body: Credentials, request: Request, response: Response, background: BackgroundTasks) -> dict:
     ip = client_ip(request)
+    if not switches.is_on(store, "signups"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["signups"])
     if signup_limiter.blocked(ip):
         raise HTTPException(429, "Too many new accounts from this network. Try again in an hour.")
-    signup_limiter.fail(ip)
     try:
         email = auth.normalize_email(body.email)
         auth.check_password_strength(body.password)
     except auth.AuthError as exc:
         raise HTTPException(400, str(exc)) from exc
+    if settings.require_terms and not body.accept_terms:
+        raise HTTPException(400, "Please confirm you're 18 or over and agree to the Terms and Privacy Policy.")
+    signup_limiter.fail(ip)
     is_admin = email in admin_emails()
     try:
         uid = store.create_user(email, auth.hash_password(body.password), "pro" if is_admin else "free", is_admin)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    if body.accept_terms:
+        store.update_user(uid, terms_accepted_at=time.time())
     set_session(response, uid)
     send_verification(uid, email, background)
     return {"ok": True, "verify_sent": True}
@@ -494,10 +583,41 @@ def delete_me(body: PasswordBody, response: Response, user: dict = Depends(curre
     """Delete the account and everything in it (games, puzzles, bundles, repertoires). Needs the password."""
     if not auth.verify_password(body.password, user["pw_hash"]):
         raise HTTPException(401, "That password isn't right.")
+    store.audit(f"user:{user['id']}", "account_deleted", None, None, user["id"])  # no email: the account is gone
     for acct in store.delete_user(user["id"]):
         importer.knowledge.remove(acct)
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return {"ok": True}
+
+
+@app.get("/api/me/export")
+def export_me(user: dict = Depends(current_user)) -> StreamingResponse:
+    """Everything we hold about you, as a zip of JSON files (your right of access under DPDP and GDPR)."""
+    key = f"user:{user['id']}"
+    if export_limiter.blocked(key):
+        raise HTTPException(429, "You've downloaded your data a few times already. Try again in an hour.")
+    export_limiter.fail(key)
+    audit(user, "data_exported")
+    data = store.export_user(user["id"])
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("README.txt", "Your Plateau Breaker data, exported " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()) + ".\n\n"
+                   "account.json        your account, linked chess accounts and settings (times are Unix seconds)\n"
+                   "games/*.json        every analysed game, per linked account\n"
+                   "puzzles/*.json      puzzles made from your mistakes, with your training progress\n"
+                   "activity.json       repertoires, daily usage, plan requests, support messages, coaching, security log\n\n"
+                   "Questions: " + (settings.support_email or settings.public_url) + "\n")
+        dump = lambda obj: json.dumps(obj, indent=2, default=str)  # noqa: E731
+        z.writestr("account.json", dump({"user": data["user"], "accounts": data["accounts"]}))
+        for label, games in data["games"].items():
+            z.writestr(f"games/{label}.json", dump(games))
+        for label, rows in data["puzzles"].items():
+            z.writestr(f"puzzles/{label}.json", dump(rows))
+        z.writestr("activity.json", dump({k: data[k] for k in ("repertoires", "usage", "plan_requests", "support_messages", "roster",
+                                                                "homework_set", "squads_joined", "homework_received", "security_log")}))
+    buf.seek(0)
+    fname = f"plateau-breaker-data-{time.strftime('%Y%m%d')}.zip"
+    return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @app.get("/api/plans")
@@ -506,10 +626,18 @@ def plans() -> list[dict]:
 
 
 @app.post("/api/upgrade-request")
-def upgrade_request(body: UpgradeRequest, user: dict = Depends(current_user)) -> dict:
+def upgrade_request(body: UpgradeRequest, background: BackgroundTasks, user: dict = Depends(current_user)) -> dict:
     if body.plan not in OFFER_IDS or body.plan == "free":
         raise HTTPException(400, "Unknown plan.")
     store.add_upgrade_request(user["id"], body.note, body.plan)
+    audit(user, "plan_requested", body.plan)
+    name = {"coach": "the Coach plan", "event": f"a {EVENT_PASS_DAYS}-day Event Pass"}.get(body.plan, "Pro")
+    command = f"python scripts/admin.py grant {user['email']}" + {"coach": " --plan coach", "event": f" --days {EVENT_PASS_DAYS}"}.get(body.plan, "")
+    subject, text, html = plan_request_email(name)
+    background.add_task(mailer.send, user["email"], subject, text, html)
+    for owner in sorted({settings.support_email, *admin_emails()} - {None, ""}):  # tell the owner, with the command to run
+        subject, text = plan_request_admin_email(user["email"], name, command, body.note)
+        background.add_task(mailer.send, owner, subject, text, None, user["email"])
     msg = {"coach": "Thanks! We'll email you when your Coach plan is switched on.",
            "event": f"Thanks! We'll email you when your {EVENT_PASS_DAYS}-day Event Pass is switched on."}.get(
         body.plan, "Thanks! We'll email you when your Pro access is switched on.")
@@ -586,6 +714,7 @@ def unlink_account(account_id: int, user: dict = Depends(current_user)) -> dict:
 
 
 def _start_import(user: dict, acct: dict, **payload) -> dict:
+    imports_allowed()
     job_id = jobs.submit("import", payload, user["id"], acct["id"], exclusive=True)  # atomic: no double imports
     if job_id is None:
         raise HTTPException(409, "This account is already syncing.")
@@ -817,8 +946,19 @@ def coach(account_id: int, req: ChatRequest, user: dict = Depends(verified_user)
     spend(user, "coach", plan_of(user)["coach_messages_per_day"])
     tools = CoachTools(games, bundle_or_404(acct), state["engine"], store.count_due(player_key(acct)), pro=is_pro(user))
     backends = resolve_backends(settings)
+    notice = None
+    if backends and not switches.is_on(store, "ai_coach"):
+        backends, notice = [], switches.PAUSED_MESSAGES["ai_coach"]
+    budget = plan_of(user).get("ai_tokens_per_day", 0)
+    if backends and budget and store.usage_today(user["id"], "ai_tokens") >= budget:
+        backends, notice = [], "You've used today's AI coach allowance, so the built-in coach is answering. It resets at midnight UTC."
     r = Coach(acct["handle"], tools, backends).chat(req.message, req.history)  # never raises: falls back to offline
-    coach_stats.record(r.mode, r.notice)
+    if r.tokens:
+        store.bump_usage(user["id"], "ai_tokens", r.tokens)
+    if notice and not r.notice:
+        r.notice = notice
+    if not notice:  # a deliberate pause or cap isn't a provider failure
+        coach_stats.record(r.mode, r.notice)
     return {"reply": r.reply, "answer": r.answer, "notice": r.notice, "mode": r.mode, "tools_used": r.tools_used,
             "model": r.model or (backends[0].label if backends else None), "citations": r.citations, "grounded": r.grounded,
             "unverified": r.unverified}
@@ -991,6 +1131,7 @@ class StudentCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=60)
     platform: str = Field(..., pattern="^(lichess|chesscom|pgn)$")
     handle: str = Field(..., min_length=1, max_length=60)
+    consent: bool = False  # the student (or a parent or guardian, if under 18) agreed to their games being analysed here
 
 
 class StudentPatch(BaseModel):
@@ -1087,6 +1228,8 @@ def add_student(body: StudentCreate, user: dict = Depends(coach_user)) -> dict:
     cap = plan_of(user).get("max_students", 0)
     if len(store.students(user["id"])) >= cap:
         raise HTTPException(402, {"message": f"Your plan has room for {cap} students. Remove one to add another.", "upgrade": False})
+    if not body.consent:
+        raise HTTPException(400, "Please confirm the student (or their parent or guardian, if they're under 18) has agreed.")
     if body.platform != "pgn":
         platform_allowed(body.platform)
     try:
@@ -1095,8 +1238,11 @@ def add_student(body: StudentCreate, user: dict = Depends(coach_user)) -> dict:
         raise HTTPException(400, str(exc)) from exc
     if any(a["platform"] == body.platform and a["handle"].lower() == handle.lower() for a in store.accounts(user["id"])):
         raise HTTPException(409, f"{handle} is already in your accounts or on your roster.")
+    if body.platform != "pgn":
+        imports_allowed()
     acct = store.add_account(user["id"], body.platform, handle, role="student")
-    sid = store.add_student(user["id"], acct["id"], body.name.strip())
+    sid = store.add_student(user["id"], acct["id"], body.name.strip(), consent=True)
+    audit(user, "student_added", f"student:{sid}", platform=body.platform, handle=handle)
     if body.platform != "pgn":
         jobs.submit("import", {"max_games": games_cap(user), "time_classes": acct["time_classes"].split(",")}, user["id"], acct["id"], exclusive=True)
     return student_summary(store.student(sid))
@@ -1132,6 +1278,7 @@ def remove_student(student_id: int, user: dict = Depends(coach_user)) -> dict:
     st = owned_student(student_id, user)
     acct = store.account(st["account_id"])
     store.delete_student(student_id)
+    audit(user, "student_removed", f"student:{student_id}", name=st["name"])
     if acct:
         store.delete_account(acct["id"])
         store.delete_player(player_key(acct))
@@ -1150,6 +1297,7 @@ def sync_student(student_id: int, user: dict = Depends(coach_user)) -> dict:
 
 @app.post("/api/coach/sync-all")
 def sync_all_students(user: dict = Depends(coach_user)) -> dict:
+    imports_allowed()
     queued = 0
     for st in store.students(user["id"]):
         acct = store.account(st["account_id"])
@@ -1161,7 +1309,7 @@ def sync_all_students(user: dict = Depends(coach_user)) -> dict:
 
 
 def settings_allows(platform: str) -> bool:
-    return platform != "chesscom" or settings.chesscom_enabled
+    return platform != "chesscom" or (settings.chesscom_enabled and switches.is_on(store, "chesscom"))
 
 
 @app.post("/api/coach/students/{student_id}/invite")
@@ -1178,6 +1326,7 @@ def invite_student(student_id: int, body: InviteRequest, background: BackgroundT
         subject, text, html = coach_invite_email(user["email"], st["name"], link)
         background.add_task(mailer.send, to, subject, text, html, user["email"])
         sent_to = to
+    audit(user, "student_invited", f"student:{student_id}", emailed=bool(sent_to))
     return {"link": link, "sent_to": sent_to, "expires_in_days": 14}
 
 
@@ -1190,6 +1339,7 @@ def join_coach(body: JoinRequest, user: dict = Depends(current_user)) -> dict:
         store.leave_coach(user["id"], st["id"])
         raise HTTPException(400, "That's your own invite link. Send it to your student.")
     coach = store.user_by_id(st["coach_id"])
+    audit(user, "squad_joined", f"student:{st['id']}", coach_id=st["coach_id"])
     return {"ok": True, "message": f"You've joined {coach['email'] if coach else 'your coach'}'s squad. Pro is switched on for you."}
 
 
@@ -1207,6 +1357,7 @@ def my_coaching(user: dict = Depends(current_user)) -> list[dict]:
 def leave_coach(student_id: int, user: dict = Depends(current_user)) -> dict:
     if not store.leave_coach(user["id"], student_id):
         raise HTTPException(404, "You're not in that squad.")
+    audit(user, "squad_left", f"student:{student_id}")
     return {"ok": True}
 
 
@@ -1283,6 +1434,7 @@ def admin_email_test(user: dict = Depends(admin_user)) -> dict:
     if test_email_limiter.blocked(key):
         raise HTTPException(429, "That's a lot of test emails. Try again in an hour.")
     test_email_limiter.fail(key)
+    audit(user, "test_email")
     try:
         info = mailer.test(user["email"])
     except MailError as exc:
@@ -1290,6 +1442,30 @@ def admin_email_test(user: dict = Depends(admin_user)) -> dict:
     msg = (f"Sent a test email to {user['email']}. It usually arrives within a minute; check spam too."
            if mailer.configured else "Email isn't set up, so the test was saved to the outbox/ folder instead.")
     return {"ok": True, "message": msg, **info}
+
+
+class SwitchBody(BaseModel):
+    on: bool
+
+
+@app.get("/api/admin/switches")
+def admin_switches(user: dict = Depends(admin_user)) -> list[dict]:
+    """Kill switches: pause one part of the service without a redeploy."""
+    return [{"name": n, "label": label, "on": switches.is_on(store, n)} for n, label in switches.SWITCHES.items()]
+
+
+@app.post("/api/admin/switches/{name}")
+def admin_set_switch(name: str, body: SwitchBody, user: dict = Depends(admin_user)) -> dict:
+    if name not in switches.SWITCHES:
+        raise HTTPException(404, "No such switch.")
+    switches.set_switch(store, name, body.on, actor=user["email"])
+    return {"ok": True, "name": name, "on": body.on}
+
+
+@app.get("/api/admin/audit")
+def admin_audit(limit: int = 100, user: dict = Depends(admin_user)) -> list[dict]:
+    """The most recent entries in the audit log: admin, roster, account and data actions."""
+    return store.audit_entries(max(1, min(limit, 500)))
 
 
 @app.post("/api/client-error")
@@ -1314,6 +1490,7 @@ def public_config() -> dict:
         "coach_models": [b.label for b in backends],
         "email_configured": mailer.configured,
         "require_verified_email": settings.require_verified_email,
+        "require_terms": settings.require_terms,
         "preview_games": settings.preview_games,
         "event_pass_days": EVENT_PASS_DAYS,
     }
@@ -1371,6 +1548,13 @@ def unsubscribe(token: str = "") -> HTMLResponse:
 
 
 # ---- pages ----------------------------------------------------------------------------------------
+@app.get("/privacy", response_class=HTMLResponse)
+@app.get("/terms", response_class=HTMLResponse)
+@app.get("/refunds", response_class=HTMLResponse)
+def legal_page(request: Request) -> HTMLResponse:
+    return HTMLResponse(legal.render(request.url.path.strip("/"), settings))
+
+
 @app.get("/status")
 def status_page() -> FileResponse:
     return FileResponse(STATIC / "status.html")

@@ -25,9 +25,11 @@ email, error monitoring, analytics, a status page and a support address. Plan on
 | **Chess.com** PubAPI | Free community tools are welcome. **Selling a tool built on the API needs a proposal to their Business Development team.** | Email them before launch. Until they agree, keep `CHESSCOM_ENABLED=0` (Lichess + PGN only). |
 | **Lichess** | Commercial use is allowed within reasonable limits, at Lichess's discretion. | The app already sends one request at a time and pauses a minute after a 429. Set `CONTACT_EMAIL`. |
 
-Publish a Terms of Service, Privacy Policy and Refund Policy before taking payments. Users can delete
-their account and all its data from **Account → Delete account**. India's DPDP rules treat under-18s as
-children who need verified parental consent, so launch as 18+.
+Draft Terms, Privacy and Refund pages are built in (`/terms`, `/privacy`, `/refunds`). Set `LEGAL_ENTITY`,
+`LEGAL_CITY` and `SUPPORT_EMAIL`, have a lawyer review the text, then set `LEGAL_REVIEWED=1` to remove the
+"draft" note. Sign-up asks people to confirm they're 18+ (India's DPDP rules treat under-18s as children
+who need verified parental consent), and coaches confirm consent for each student. Users can download
+everything (**Account → Download my data**) or delete it (**Account → Delete account**).
 
 ## 1. What you need
 
@@ -57,6 +59,7 @@ su - plateau
 git clone https://github.com/<you>/chess_analytics.git
 cd chess_analytics/deploy
 cp .env.example .env
+chmod 600 .env       # your secrets: readable by you only
 nano .env            # at least DOMAIN, PUBLIC_URL, ADMIN_EMAILS, SUPPORT_EMAIL, LLM_* keys
                      # put values containing $, spaces or # in single quotes
 docker compose up -d --build
@@ -172,12 +175,31 @@ Security Policy only allows the analytics host you configured.
 
 ## 9. Updating
 
+Release tagged versions, staging first (see `RUNBOOK.md` → Releasing):
+
 ```bash
-cd ~/chess_analytics && git pull
+cd ~/chess_analytics && git fetch --tags && git checkout v0.7.0
 cd deploy && docker compose up -d --build
 ```
 
-Running jobs are re-queued automatically if a worker restarts mid-import.
+Running jobs are re-queued automatically if a worker restarts mid-import. To roll back, check out the
+previous tag and run the same command: schema changes are additive, so older versions run on newer databases.
+
+## 9a. Security checklist
+
+* **CI:** `.github/workflows/ci.yml` runs ruff, the tests, `pip-audit` and a Docker build on every push. In
+  GitHub → Settings → Branches, protect `main` and require the CI checks to pass.
+* **Dependencies:** the image installs `requirements.lock` (exact versions with hashes). Dependabot opens
+  weekly update PRs; merge them when CI is green.
+* **Uploads:** Caddy rejects request bodies over 30 MB before they reach Python.
+* **Cross-site requests:** write requests whose `Origin` isn't your site get a 403.
+* **Rate limits** live in the database, so they hold with several web processes.
+* **Kill switches:** `docker compose exec web python scripts/admin.py switch` (see `RUNBOOK.md`).
+* **Audit log:** `docker compose exec web python scripts/admin.py audit`.
+* **SSH:** keys only, fail2ban on, firewall allows 22/80/443 only (all done by `setup-vps.sh`).
+* **Secrets:** only in `.env` (`chmod 600`). Separate keys for staging and production; rotate any key
+  that's ever been pasted somewhere public.
+* **Load test** staging before a launch: `deploy/loadtest/locustfile.py`.
 
 ## 10. Payments (next step)
 
@@ -191,5 +213,5 @@ checkout route and a signature-verified webhook that calls `store.set_plan(user_
 
 `deploy/systemd/` has units for the web app, worker and scheduler. Install Python 3.12, Stockfish
 (`apt install stockfish`) and Caddy from apt, create a virtualenv in `/opt/plateau/.venv`, run
-`pip install -r requirements-prod.txt`, put the settings in `/etc/plateau.env`, and point Caddy at
+`pip install --require-hashes -r requirements.lock`, put the settings in `/etc/plateau.env`, and point Caddy at
 `127.0.0.1:8000`.

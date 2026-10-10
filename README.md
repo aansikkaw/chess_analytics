@@ -77,6 +77,28 @@ from your own domain instead (Brevo or another provider, see DEPLOY.md).
 
 To give yourself Pro while testing, add a Codespaces secret `ADMIN_EMAILS` with your email *before* you sign up. Or grant it afterwards with `python scripts/admin.py grant you@example.com`.
 
+## New in v0.7: ready for real users
+
+* **Security.** Writes from other websites are refused (Origin / Sec-Fetch-Site check on top of SameSite
+  cookies). Rate limits are counted in the database, so they hold across several web processes and restarts.
+  SSH is keys-only and fail2ban is on after `deploy/setup-vps.sh`.
+* **Kill switches.** Pause the AI coach, imports, Chess.com, sign-ups or email in seconds, without a redeploy:
+  `python scripts/admin.py switch ai_coach off`, or tick the boxes under Account (admins). The status page
+  shows what's paused.
+* **AI cost and safety.** Each plan has a daily AI token budget (`ai_tokens_per_day` in `app/plans.py`);
+  past it, the built-in coach answers. The prompt treats names, PGN headers and comments as data, never as
+  instructions.
+* **Audit log.** Plan requests and grants, roster changes, invites, squad joins, account deletions, data
+  exports, switch changes and test emails: `python scripts/admin.py audit`.
+* **Privacy and legal.** `/privacy`, `/terms` and `/refunds` (drafts: have a lawyer review, then set
+  `LEGAL_REVIEWED=1`). Sign-up asks people to confirm they're 18+ and agree; coaches confirm each
+  student (or a parent) agreed. **Account → Download my data** gives a zip of everything we hold.
+* **Observability.** Every response has an `X-Request-ID`; each request writes one JSON log line with it, and
+  error messages quote it, so a user's error reference leads straight to the log line and Sentry event.
+* **Release safety.** GitHub Actions runs lint, the tests, `pip-audit` and a Docker build on every push;
+  Dependabot proposes updates; the image installs exact, hash-checked versions from `requirements.lock`.
+  `RUNBOOK.md` covers incidents, rollbacks, restores and recovery targets; `deploy/loadtest/` has a Locust test.
+
 ## New in v0.6
 
 * **Train like a puzzle site.** Your opponent's move plays in first. Then drag or click your answer, with
@@ -195,6 +217,9 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 | `SUPPORT_EMAIL` | unset | Shown in the app; support messages are emailed here |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_SECURITY` | unset / `587` / … / `starttls` | Outgoing email; without it, emails go to `outbox/` |
 | `REQUIRE_EMAIL_VERIFICATION` | `0` | `1` blocks syncing and the coach until the email is confirmed |
+| `REQUIRE_TERMS` | `1` | New accounts must confirm they're 18+ and accept the Terms and Privacy Policy |
+| `LEGAL_ENTITY` / `LEGAL_CITY` / `LEGAL_UPDATED` / `LEGAL_REVIEWED` | unset | Who runs the service, courts, date and draft notice on `/privacy`, `/terms`, `/refunds` |
+| `LOG_LEVEL` | `INFO` | App log level; the JSON access log is the `plateau.access` logger |
 | `LLM_FALLBACK_BASE_URL` / `LLM_FALLBACK_API_KEY` / `LLM_FALLBACK_MODEL` | unset | Second OpenAI-compatible provider |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` / `SENTRY_TRACES_SAMPLE_RATE` | unset / `production` / `0` | Error monitoring |
 | `ANALYTICS` / `PLAUSIBLE_DOMAIN` / `POSTHOG_KEY` / `POSTHOG_HOST` | `none` | Privacy-friendly analytics |
@@ -229,13 +254,16 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 | `deploy/` | Caddyfile, docker-compose.yml, .env.example, setup-vps.sh, systemd units |
 | `app/auth.py` / `app/plans.py` / `app/store.py` | Accounts & sessions, plan limits, SQLite |
 | `app/main.py` | HTTP API with ownership and plan checks |
-| `scripts/admin.py` | Users, upgrade requests, grant/revoke Pro |
+| `scripts/admin.py` | Users, upgrade requests, grant/revoke plans, kill switches, audit log, email checks |
+| `app/switches.py` | Kill switches stored in the database, read by every process |
+| `app/legal.py` | Privacy policy, terms and refund policy pages |
+| `RUNBOOK.md` | Incidents, kill switches, restores, releases and rollbacks |
 
 ## Tests
 
 ```bash
 pip install -r requirements-dev.txt
-pytest        # 172 tests; engine tests skip if Stockfish is missing
+pytest        # 238 tests; engine tests skip if Stockfish is missing
 ruff check .
 ```
 

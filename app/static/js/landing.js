@@ -133,6 +133,7 @@ function setMode(m) {
   $("#authPw").autocomplete = c.ac || "off";
   $("#pwHint").hidden = !(m === "signup" || m === "reset");
   $("#authForgot").hidden = m !== "login";
+  $("#authTermsField").hidden = !(m === "signup" && S.config.require_terms !== false);
   const lead = $("#authLead");
   lead.hidden = !(m === "forgot" || (m === "signup" && S.pendingLink));
   lead.textContent = m === "forgot" ? "Enter your email and we'll send a link to choose a new password."
@@ -164,7 +165,10 @@ function bindAuthForm() {
         await onSignedIn();
         return;
       }
-      await post(`/api/auth/${mode}`, { email, password });
+      if (mode === "signup" && S.config.require_terms !== false && !$("#authTerms").checked) {
+        throw new Error("Please confirm you're 18 or over and agree to the Terms and Privacy Policy.");
+      }
+      await post(`/api/auth/${mode}`, mode === "signup" ? { email, password, accept_terms: $("#authTerms").checked } : { email, password });
       track(mode === "signup" ? "Signup" : "Login");
       $("#authDlg").close();
       $("#authPw").value = "";

@@ -42,6 +42,9 @@ async function refresh() {
     $("#dot").className = `status-dot ${s.status === "ok" ? "" : s.status}`;
     $("#headline").textContent = HEADLINE[s.status] || s.status;
     $("#checked").textContent = `Checked ${new Date(s.checked_at * 1000).toLocaleTimeString()}. Version ${s.version}.`;
+    const paused = s.paused || [];
+    $("#paused").hidden = !paused.length;
+    $("#paused").replaceChildren(...paused.map((p) => el("p", { text: p.message })));
     $("#checks").replaceChildren(...Object.entries(s.checks).map(([k, c]) => {
       const [name, what] = NAMES[k] || [k, ""];
       return el("li", {}, el("div", {}, el("b", { text: name }), el("span", { class: "small muted", text: ` ${what}` })),

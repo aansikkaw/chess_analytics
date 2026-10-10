@@ -21,6 +21,7 @@ PLANS: dict[str, dict] = {
         "max_games_per_sync": 200,
         "max_accounts": 2,
         "coach_messages_per_day": 15,
+        "ai_tokens_per_day": 80_000,  # cost cap: about 10-15 AI answers; after that the built-in coach answers
         "scouts_per_day": 0,
         "features": {"dna", "puzzles", "plan", "coach"},
         "blurb": "Rating DNA, puzzles from your own mistakes, a weekly plan, ChessBase/PGN upload and 15 coach questions a day.",
@@ -31,6 +32,7 @@ PLANS: dict[str, dict] = {
         "max_games_per_sync": 500,
         "max_accounts": 6,
         "coach_messages_per_day": 200,
+        "ai_tokens_per_day": 600_000,
         "scouts_per_day": 25,
         "features": {"dna", "puzzles", "plan", "coach", "scout", "repertoire", "progress", "autosync", "prep"},
         "blurb": "Everything in Free, plus Prep Check for your ChessBase repertoire, Opponent Scout, Repertoire Leaks, "
@@ -43,6 +45,7 @@ PLANS["coach"] = {
     "name": "Coach",
     "price": os.getenv("COACH_PRICE_LABEL", "₹2,499 / $29 a month"),
     "max_students": int(os.getenv("COACH_MAX_STUDENTS", "20")),
+    "ai_tokens_per_day": 1_200_000,
     "features": PLANS["pro"]["features"] | {"students"},
     "blurb": "Everything in Pro, plus a dashboard for up to 20 students: every student's Rating DNA, weak spots and homework.",
 }
