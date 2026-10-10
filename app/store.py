@@ -159,6 +159,51 @@ CREATE TABLE IF NOT EXISTS audit_log (   -- who did what, for admin and security
     detail       TEXT
 );
 CREATE INDEX IF NOT EXISTS audit_at ON audit_log (at);
+CREATE TABLE IF NOT EXISTS lib_players (   -- Opponent Library: players people prepare against (app/library.py)
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform    TEXT NOT NULL,              -- lichess | chesscom | pgn
+    handle      TEXT NOT NULL,
+    handle_key  TEXT NOT NULL,              -- lower-case handle, for lookups
+    owner_id    INTEGER NOT NULL DEFAULT 0, -- 0: a public account shared by everyone; else the user who uploaded the PGN
+    games       INTEGER NOT NULL DEFAULT 0,
+    requested   INTEGER,                    -- most games ever asked for in a full download
+    fetched_at  REAL,
+    created_at  REAL NOT NULL,
+    UNIQUE (platform, handle_key, owner_id)
+);
+CREATE TABLE IF NOT EXISTS lib_games (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id   INTEGER NOT NULL,
+    game_id     TEXT NOT NULL,
+    color       TEXT NOT NULL,              -- the library player's colour
+    opponent    TEXT NOT NULL,
+    result      TEXT NOT NULL,
+    score       REAL NOT NULL,              -- from the library player's side: 1, 0.5, 0
+    time_class  TEXT NOT NULL DEFAULT '',
+    opening     TEXT NOT NULL DEFAULT '',
+    played_at   TEXT NOT NULL DEFAULT '',
+    plies       INTEGER NOT NULL DEFAULT 0,
+    data        TEXT NOT NULL,              -- the parsed game (GameRecord) as JSON
+    UNIQUE (player_id, game_id)
+);
+CREATE INDEX IF NOT EXISTS lib_games_player ON lib_games (player_id, played_at);
+CREATE TABLE IF NOT EXISTS lib_positions (   -- position search: every position of every stored game, by Zobrist hash
+    hash        INTEGER NOT NULL,
+    game_ref    INTEGER NOT NULL,           -- lib_games.id
+    ply         INTEGER NOT NULL,
+    next_uci    TEXT                        -- the move played from here (NULL at the end of the game)
+);
+CREATE INDEX IF NOT EXISTS lib_positions_hash ON lib_positions (hash);
+CREATE INDEX IF NOT EXISTS lib_positions_game ON lib_positions (game_ref);
+CREATE TABLE IF NOT EXISTS library (   -- the players each user has saved
+    user_id     INTEGER NOT NULL,
+    player_id   INTEGER NOT NULL,
+    notes       TEXT NOT NULL DEFAULT '',
+    tags        TEXT NOT NULL DEFAULT '',
+    added_at    REAL NOT NULL,
+    opened_at   REAL,
+    PRIMARY KEY (user_id, player_id)
+);
 CREATE TABLE IF NOT EXISTS kv (
     k          TEXT PRIMARY KEY,
     v          TEXT NOT NULL,
@@ -470,6 +515,11 @@ class Store:
             c.execute("UPDATE students SET student_user_id = NULL, joined_at = NULL WHERE student_user_id = ?", (user_id,))
             if c.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'jobs'").fetchone():
                 c.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
+            c.execute("DELETE FROM library WHERE user_id = ?", (user_id,))
+            for (pid,) in c.execute("SELECT id FROM lib_players WHERE owner_id = ?", (user_id,)).fetchall():  # private PGN players
+                c.execute("DELETE FROM lib_positions WHERE game_ref IN (SELECT id FROM lib_games WHERE player_id = ?)", (pid,))
+                c.execute("DELETE FROM lib_games WHERE player_id = ?", (pid,))
+                c.execute("DELETE FROM lib_players WHERE id = ?", (pid,))
             c.execute("DELETE FROM users WHERE id = ?", (user_id,))
         return accounts
 
@@ -500,6 +550,8 @@ class Store:
                                            "JOIN users u ON u.id = s.coach_id WHERE s.student_user_id = ?", (user_id,))
             out["homework_received"] = rows(c, "SELECT a.* FROM assignments a JOIN students s ON s.id = a.student_id "
                                                "WHERE s.student_user_id = ?", (user_id,))
+            out["opponent_library"] = rows(c, "SELECT p.platform, p.handle, p.games, l.notes, l.tags, l.added_at FROM library l "
+                                              "JOIN lib_players p ON p.id = l.player_id WHERE l.user_id = ?", (user_id,))
             out["security_log"] = rows(c, "SELECT at, action, target FROM audit_log WHERE actor_id = ? ORDER BY id", (user_id,))
         return out
 

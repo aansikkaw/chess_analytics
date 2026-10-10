@@ -645,3 +645,42 @@ table.squad tbody th, table.squad thead th:first-child { position: sticky; left:
 .rail .bottom a.tiny-link { font-size: .8rem; color: var(--ink-3, var(--ink-2)); font-weight: 400; }
 .audit-list { margin: 8px 0 0; padding-left: 1.1rem; display: grid; gap: 4px; max-height: 260px; overflow: auto; }
 .switch-list { display: grid; gap: 10px; }
+
+/* ---- Opponent Library (Prepare → Opponent Library) ---- */
+.lib-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.lib-side { display: grid; gap: 10px; padding: 14px; position: sticky; top: 12px; max-height: calc(100vh - 40px); overflow: auto; }
+.lib-side input[type=search] { width: 100%; }
+.lib-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.lib-list li { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; padding: 8px 6px; border-radius: 8px; }
+.lib-list li.open { background: color-mix(in srgb, var(--blue) 9%, transparent); }
+.lib-list input { width: 17px; height: 17px; margin-top: 3px; accent-color: var(--blue); }
+.lib-name { all: unset; cursor: pointer; display: grid; gap: 2px; min-width: 0; }
+.lib-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-name:hover b, .lib-name:focus-visible b { color: var(--blue); text-decoration: underline; }
+.lib-name:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+.lib-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.lib-tags .tag { font-size: .7rem; padding: 0 6px; }
+.small-chips .chip { padding: 4px 10px; font-size: .8rem; }
+.chip.on { border-color: var(--blue); color: var(--blue); background: color-mix(in srgb, var(--blue) 8%, var(--sheet)); }
+.lib-main { min-width: 0; }
+.lib-main .tabs { margin-bottom: 16px; }
+.lib-filters { padding: 10px 16px; margin-bottom: 16px; }
+.lib-filters summary { cursor: pointer; font-weight: 600; }
+.lib-filters form { margin-top: 12px; }
+.lf-classes { border: 0; padding: 0; margin: 0; }
+.lf-classes legend { font-weight: 600; font-size: .88rem; margin-bottom: 6px; }
+.lib-explorer { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 20px; align-items: start; }
+.lib-explorer form.row input { flex: 1 1 200px; min-width: 0; }
+.lib-line { margin: 0; min-height: 1.6em; font-variant-numeric: tabular-nums; line-height: 1.7; }
+.lib-line .link { padding: 0 1px; }
+.wdl { display: flex; height: 20px; min-width: 110px; border-radius: 4px; overflow: hidden; border: 1px solid var(--rule-2); font-size: .7rem; font-weight: 650; }
+.wdl i { font-style: normal; display: grid; place-items: center; overflow: hidden; white-space: nowrap; }
+.wdl .w { background: #f4f1ea; color: #333; }
+.wdl .d { background: #a9a59c; color: #1f1f1f; }
+.wdl .b { background: #3a3835; color: #f1f1f1; }
+.danger-text { color: var(--red); }
+.lib-empty { text-align: left; }
+@media (max-width: 900px) {
+  .lib-layout, .lib-explorer { grid-template-columns: minmax(0, 1fr); }
+  .lib-side { position: static; max-height: 320px; }
+}

@@ -33,8 +33,9 @@ from .analysis import win_percent
 from .coach import Coach, CoachTools
 from .config import load_settings
 from .engine import Engine, EngineUnavailable
-from .games import TIME_CLASSES, GameImportError, decode_upload, name_matches, player_names, validate_pgn_name, validate_username
+from .games import TIME_CLASSES, GameImportError, decode_upload, name_matches, parse_pgn, player_names, validate_pgn_name, validate_username
 from .jobs import JobQueue
+from .library import ALL_CLASSES, Library, board_from, to_pgn
 from .llm import resolve_backends
 from .mailer import (MailError, Mailer, coach_invite_email, plan_request_admin_email, plan_request_email, reset_email, support_email,
                      verification_email)
@@ -69,6 +70,7 @@ importer = Importer(store, settings)
 queue = JobQueue(settings.db_path)
 jobs = Jobs(queue, importer, settings)
 mailer = Mailer(settings, store)
+library = Library(store)
 coach_stats = CoachStats()
 login_limiter = auth.SharedLimiter(store, "login")
 preview_limiter = auth.SharedLimiter(store, "preview", limit=settings.previews_per_hour, window=3600)
@@ -565,7 +567,7 @@ def me(user: dict = Depends(current_user)) -> dict:
         "sponsored_by": user.get("sponsored_by"), "max_students": p.get("max_students", 0),
         "coaches": [{"student_id": c["id"], "coach_email": c["coach_email"]} for c in store.coaches_of(user["id"])],
         "features": sorted(p["features"]),
-        "limits": {k: p[k] for k in ("max_games_per_sync", "max_accounts", "coach_messages_per_day", "scouts_per_day")},
+        "limits": {k: p.get(k, 0) for k in ("max_games_per_sync", "max_accounts", "coach_messages_per_day", "scouts_per_day", "library_players")},
         "usage_today": {"coach": store.usage_today(user["id"], "coach"), "scout": store.usage_today(user["id"], "scout")},
         "accounts": [account_view(a) for a in store.accounts(user["id"])],
     }
@@ -613,7 +615,7 @@ def export_me(user: dict = Depends(current_user)) -> StreamingResponse:
             z.writestr(f"games/{label}.json", dump(games))
         for label, rows in data["puzzles"].items():
             z.writestr(f"puzzles/{label}.json", dump(rows))
-        z.writestr("activity.json", dump({k: data[k] for k in ("repertoires", "usage", "plan_requests", "support_messages", "roster",
+        z.writestr("activity.json", dump({k: data[k] for k in ("repertoires", "usage", "plan_requests", "support_messages", "roster", "opponent_library",
                                                                 "homework_set", "squads_joined", "homework_received", "security_log")}))
     buf.seek(0)
     fname = f"plateau-breaker-data-{time.strftime('%Y%m%d')}.zip"
@@ -994,22 +996,232 @@ def progress(account_id: int, user: dict = Depends(current_user)) -> dict:
 
 @app.post("/api/scout")
 def scout(req: ScoutRequest, user: dict = Depends(verified_user)) -> dict:
+    """Scout a player: download (or update) their games into your Opponent Library, then build the report.
+    Only downloads count towards the daily limit; a player fetched in the last 30 minutes opens from the library."""
     require_feature(user, "scout")
-    platform_allowed(req.platform)
-    my_games = None
-    if req.account_id is not None:
-        my_games = store.load_games(player_key(owned_account(req.account_id, user)))
+    player, downloaded, new = _library_download(user, req.platform, req.handle, req.max_games)
+    library.save(user["id"], player["id"])
+    return _scout_from_library(user, player["id"], req.max_games, req.account_id) | {"downloaded": downloaded, "new_games": new}
+
+
+# ---- Opponent Library (a ChessBase-style database of the players you prepare against) --------------------
+def library_user(user: dict = Depends(verified_user)) -> dict:
+    require_feature(user, "scout")
+    return user
+
+
+def _library_room(user: dict, player_id: int | None) -> None:
+    cap = plan_of(user).get("library_players", 0)
+    if (player_id is None or not library.has(user["id"], player_id)) and library.count(user["id"]) >= cap:
+        raise HTTPException(402, {"message": f"Your library holds {cap} players. Remove one to add another.", "upgrade": False})
+
+
+def _library_download(user: dict, platform: str, handle: str, want: int) -> tuple[dict, bool, int]:
+    """Make sure the player is in the library with up to `want` games, downloading only what's missing."""
+    platform_allowed(platform)
+    imports_allowed()
     limit = plan_of(user)["scouts_per_day"]
-    if store.usage_today(user["id"], "scout") >= limit:
-        spend(user, "scout", limit)  # raises the usual "daily limit reached" error
     try:
-        handle = check_account(req.platform, req.handle)
-        classes = req.time_classes or ["bullet", "blitz", "rapid", "classical"]
-        games = fetch_games(req.platform, handle, req.max_games, classes)
+        handle = check_account(platform, handle)
     except GameImportError as exc:
         raise HTTPException(400, str(exc)) from exc
+    player = library.get_or_create_player(platform, handle)
+    _library_room(user, player["id"])
+    want = min(want, games_cap(user))
+    if not library.needs_download(player, want):
+        return player, False, 0
+    if store.usage_today(user["id"], "scout") >= limit:
+        if player["games"]:  # out of downloads today, but we still have their games: use those
+            return player, False, 0
+        spend(user, "scout", limit)  # raises the usual "daily limit reached" error
+    since = library.fetch_plan(player, want)
+    try:
+        recs = fetch_games(platform, handle, want, ALL_CLASSES, **({"since_ms": since} if since else {}))
+    except GameImportError as exc:
+        if player["games"]:  # the site is down: carry on with what's stored
+            return player, False, 0
+        raise HTTPException(400, str(exc)) from exc
+    new = library.add_games(player["id"], recs, requested=want if since is None else None)
     spend(user, "scout", limit)  # only successful downloads count towards the daily limit
-    return scout_report(handle, games, state["engine"], my_games)
+    return library.player(player["id"]), True, new
+
+
+def _owned_library_player(user: dict, player_id: int) -> dict:
+    if not library.has(user["id"], player_id):
+        raise HTTPException(404, "That player isn't in your library.")
+    return library.player(player_id)
+
+
+def _scout_from_library(user: dict, player_id: int, games: int, account_id: int | None) -> dict:
+    player = library.player(player_id)
+    recs = library.records(player_id, limit=max(10, min(games, 1000)))
+    my_games = store.load_games(player_key(owned_account(account_id, user))) if account_id is not None else None
+    report = scout_report(player["handle"], recs, state["engine"], my_games)
+    return report | {"player": library.entry(user["id"], player_id)}
+
+
+class LibraryAdd(BaseModel):
+    platform: str = Field(..., pattern="^(lichess|chesscom)$")
+    handle: str = Field(..., max_length=30)
+    max_games: int = Field(200, ge=10, le=500)
+
+
+class LibraryFilters(BaseModel):
+    players: list[int] = Field(default_factory=list, max_length=500)
+    color: str | None = Field(None, pattern="^(white|black)$")
+    result: str | None = Field(None, pattern="^(win|draw|loss)$")
+    time_classes: list[str] | None = Field(None, max_length=4)
+    opening: str | None = Field(None, max_length=80)
+    opponent: str | None = Field(None, max_length=60)
+    date_from: str | None = Field(None, pattern=r"^\d{4}[-.]\d{2}[-.]\d{2}$")
+    date_to: str | None = Field(None, pattern=r"^\d{4}[-.]\d{2}[-.]\d{2}$")
+
+
+class LibraryGamesRequest(LibraryFilters):
+    limit: int = Field(50, ge=1, le=200)
+    offset: int = Field(0, ge=0)
+
+
+class ExploreRequest(LibraryFilters):
+    moves: list[str] = Field(default_factory=list, max_length=300)
+    fen: str | None = Field(None, max_length=100)
+
+
+class LibraryPatch(BaseModel):
+    notes: str | None = Field(None, max_length=4000)
+    tags: list[str] | None = Field(None, max_length=12)
+
+
+def _filters(body: LibraryFilters) -> dict:
+    return body.model_dump(exclude={"players", "limit", "offset", "moves", "fen"})
+
+
+@app.get("/api/library")
+def library_list(user: dict = Depends(library_user)) -> dict:
+    rows = library.entries(user["id"])
+    return {"players": rows, "limit": plan_of(user).get("library_players", 0), "tags": sorted({t for r in rows for t in r["tags"]}),
+            "downloads_left": max(0, plan_of(user)["scouts_per_day"] - store.usage_today(user["id"], "scout"))}
+
+
+@app.post("/api/library")
+def library_add(body: LibraryAdd, user: dict = Depends(library_user)) -> dict:
+    player, downloaded, new = _library_download(user, body.platform, body.handle, body.max_games)
+    library.save(user["id"], player["id"])
+    return {"player": library.entry(user["id"], player["id"]), "downloaded": downloaded, "new_games": new}
+
+
+@app.post("/api/library/{player_id}/update")
+def library_update(player_id: int, user: dict = Depends(library_user)) -> dict:
+    p = _owned_library_player(user, player_id)
+    if p["platform"] == "pgn":
+        raise HTTPException(400, "This player's games come from a PGN upload. Upload a newer file to add games.")
+    _, downloaded, new = _library_download(user, p["platform"], p["handle"], max(p.get("requested") or 0, p["games"], 10))
+    msg = (f"{new} new game{'s' if new != 1 else ''} added." if downloaded else "Already up to date.")
+    return {"player": library.entry(user["id"], player_id), "downloaded": downloaded, "new_games": new, "message": msg}
+
+
+@app.get("/api/library/{player_id}/report")
+def library_report(player_id: int, games: int = 200, account_id: int | None = None, user: dict = Depends(library_user)) -> dict:
+    _owned_library_player(user, player_id)
+    library.save(user["id"], player_id)  # marks it as recently opened
+    return _scout_from_library(user, player_id, games, account_id)
+
+
+@app.patch("/api/library/{player_id}")
+def library_patch(player_id: int, body: LibraryPatch, user: dict = Depends(library_user)) -> dict:
+    _owned_library_player(user, player_id)
+    library.update_entry(user["id"], player_id, body.notes, body.tags)
+    return {"player": library.entry(user["id"], player_id)}
+
+
+@app.delete("/api/library/{player_id}")
+def library_remove(player_id: int, user: dict = Depends(library_user)) -> dict:
+    if not library.remove(user["id"], player_id):
+        raise HTTPException(404, "That player isn't in your library.")
+    return {"ok": True}
+
+
+@app.post("/api/library/games")
+def library_games(body: LibraryGamesRequest, user: dict = Depends(library_user)) -> dict:
+    return library.games(library.owned_ids(user["id"], body.players), _filters(body), body.limit, body.offset)
+
+
+@app.post("/api/library/explore")
+def library_explore(body: ExploreRequest, user: dict = Depends(library_user)) -> dict:
+    try:
+        board = board_from(body.moves, body.fen)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc) if "FEN" in str(exc) else "Those moves aren't legal from that position.") from exc
+    return library.explore(library.owned_ids(user["id"], body.players), board, _filters(body))
+
+
+@app.get("/api/library/games/{game_ref}")
+def library_game(game_ref: int, user: dict = Depends(library_user)) -> dict:
+    """One library game for the board viewer (same shape as an analysed game, without engine marks)."""
+    found = library.game(game_ref)
+    if not found or not library.has(user["id"], found[0]["player_id"]):
+        raise HTTPException(404, "No such game.")
+    row, rec = found
+    board, fens, ucis, sans = chess.Board(), [chess.STARTING_FEN], [], []
+    for uci in rec.moves:
+        try:
+            mv = chess.Move.from_uci(uci)
+            sans.append(board.san(mv))
+        except ValueError:
+            break
+        ucis.append(uci)
+        board.push(mv)
+        fens.append(board.fen())
+    return {"game_id": rec.game_id, "title": f"{rec.white} vs {rec.black}", "library": True, "player": row["player"],
+            "opponent": row["opponent"], "color": row["color"], "result": rec.result, "opening": rec.opening, "played_at": rec.played_at,
+            "accuracy": None, "url": rec.url, "time_class": rec.time_class, "moves_san": sans, "ucis": ucis, "fens": fens, "marks": [],
+            "pgn": to_pgn(rec)}
+
+
+@app.post("/api/library/upload")
+async def library_upload(file: UploadFile = File(...), name: str = Form(""), user: dict = Depends(library_user)) -> dict:
+    """Add an over-the-board opponent from a ChessBase / PGN file. Private to you."""
+    data = await file.read()
+    try:
+        text = decode_upload(data, file.filename or "")
+    except GameImportError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    name = name.strip()
+    if not name:
+        names = player_names(text, 12)
+        if not names:
+            raise HTTPException(400, "No games found in that file.")
+        return {"choose": [{"name": n, "games": c} for n, c in names]}
+    try:
+        name = validate_pgn_name(name)
+        recs = parse_pgn(text, name)
+    except GameImportError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    player = library.get_or_create_player("pgn", name, owner_id=user["id"])
+    _library_room(user, player["id"])
+    new = library.add_games(player["id"], recs, requested=len(recs))
+    library.save(user["id"], player["id"])
+    return {"player": library.entry(user["id"], player["id"]), "new_games": new,
+            "message": f"Added {new} game{'s' if new != 1 else ''} for {name}." + (" The rest were already in your library." if new < len(recs) else "")}
+
+
+@app.get("/api/library/export.pgn")
+def library_export(request: Request, user: dict = Depends(library_user)) -> Response:
+    """The selected players' games (with the same filters as the Games list) as one PGN file for ChessBase."""
+    q = request.query_params
+    try:
+        body = LibraryFilters(players=[int(x) for x in q.get("players", "").split(",") if x.strip()],
+                              color=q.get("color") or None, result=q.get("result") or None,
+                              time_classes=[t for t in q.get("time_classes", "").split(",") if t] or None,
+                              opening=q.get("opening") or None, opponent=q.get("opponent") or None,
+                              date_from=q.get("date_from") or None, date_to=q.get("date_to") or None)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, "Those filters aren't valid.") from exc
+    ids = library.owned_ids(user["id"], body.players)
+    text = library.pgn(ids, _filters(body))
+    names = [library.player(i)["handle"] for i in ids[:3]]
+    fname = ("-".join(names) + ("-and-more" if len(ids) > 3 else "") or "library").replace(" ", "_")[:60]
+    return Response(text, media_type="application/x-chess-pgn", headers={"Content-Disposition": f'attachment; filename="{fname}.pgn"'})
 
 
 # ---- file upload (ChessBase / any PGN) -------------------------------------------------------

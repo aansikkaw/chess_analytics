@@ -23,6 +23,7 @@ PLANS: dict[str, dict] = {
         "coach_messages_per_day": 15,
         "ai_tokens_per_day": 80_000,  # cost cap: about 10-15 AI answers; after that the built-in coach answers
         "scouts_per_day": 0,
+        "library_players": 0,
         "features": {"dna", "puzzles", "plan", "coach"},
         "blurb": "Rating DNA, puzzles from your own mistakes, a weekly plan, ChessBase/PGN upload and 15 coach questions a day.",
     },
@@ -33,7 +34,8 @@ PLANS: dict[str, dict] = {
         "max_accounts": 6,
         "coach_messages_per_day": 200,
         "ai_tokens_per_day": 600_000,
-        "scouts_per_day": 25,
+        "scouts_per_day": 25,  # downloads: opening a player already in your library is free
+        "library_players": 150,  # players saved in the Opponent Library
         "features": {"dna", "puzzles", "plan", "coach", "scout", "repertoire", "progress", "autosync", "prep"},
         "blurb": "Everything in Free, plus Prep Check for your ChessBase repertoire, Opponent Scout, Repertoire Leaks, "
                  "Progress tracking and Auto-sync.",
@@ -46,6 +48,7 @@ PLANS["coach"] = {
     "price": os.getenv("COACH_PRICE_LABEL", "₹2,499 / $29 a month"),
     "max_students": int(os.getenv("COACH_MAX_STUDENTS", "20")),
     "ai_tokens_per_day": 1_200_000,
+    "library_players": 500,
     "features": PLANS["pro"]["features"] | {"students"},
     "blurb": "Everything in Pro, plus a dashboard for up to 20 students: every student's Rating DNA, weak spots and homework.",
 }
@@ -70,7 +73,7 @@ OFFERS: list[dict] = [
     {"id": "pro", "name": "Pro", "grants": "pro", "tagline": "Prepare for real opponents and track your progress.", "featured": True,
      "price": {"inr": os.getenv("PRO_PRICE_INR", "₹399"), "usd": os.getenv("PRO_PRICE_USD", "$6"), "period": "month",
                "annual_inr": os.getenv("PRO_ANNUAL_INR", "₹2,999"), "annual_usd": os.getenv("PRO_ANNUAL_USD", "$49")},
-     "points": ["Everything in Free", "Prep Check: your ChessBase repertoire vs your games", "Opponent Scout (25 a day)",
+     "points": ["Everything in Free", "Prep Check: your ChessBase repertoire vs your games", "Opponent Scout and a saved Opponent Library with position search",
                 "Repertoire Leaks and recurring mistakes", "Progress tracking and Auto-sync", "Up to 500 games per sync, 200 coach questions a day"]},
     {"id": "event", "name": "Event Pass", "grants": "pro", "tagline": f"Pro for {EVENT_PASS_DAYS} days, for one tournament.",
      "price": {"inr": os.getenv("EVENT_PRICE_INR", "₹149"), "usd": os.getenv("EVENT_PRICE_USD", "$3"), "period": "one-off"},

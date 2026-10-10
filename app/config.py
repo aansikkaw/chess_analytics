@@ -77,7 +77,7 @@ class Settings:
     plausible_src: str = "https://plausible.io/js/script.tagged-events.js"
     posthog_key: str | None = None
     posthog_host: str = "https://eu.i.posthog.com"
-    app_version: str = "0.7.0"
+    app_version: str = "0.8.0"
 
 
 def _public_url() -> str:

@@ -83,7 +83,8 @@ export function route() {
   const main = $("#view");
   document.title = `${AREAS[area].title} · Plateau Breaker`;
   const acct = account();
-  const free = area === "plans" || area === "students"; // pages that don't need a chess account selected
+  // Pages that don't need your own chess account: plans, the coach dashboard, scouting and the Opponent Library.
+  const free = area === "plans" || area === "students" || (area === "prepare" && (sub === "scout" || sub === "library"));
   if (!free && !acct) { renderOnboarding(main); return; }
   if (!free && !acct.games) { renderWaiting(main, acct); return; }
   AREAS[area].view.render(main, sub);

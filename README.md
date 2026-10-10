@@ -77,6 +77,30 @@ from your own domain instead (Brevo or another provider, see DEPLOY.md).
 
 To give yourself Pro while testing, add a Codespaces secret `ADMIN_EMAILS` with your email *before* you sign up. Or grant it afterwards with `python scripts/admin.py grant you@example.com`.
 
+## New in v0.8: Opponent Library (your own Mega Database of opponents)
+
+Prepare → **Opponent Library**. Every player you scout is saved with their games, like a ChessBase database:
+
+* **Search once, open instantly.** Opening a saved player is free and instant. **Update** downloads only games
+  played since the last download, and asking for more games (100 → 500) fetches the older ones. A player
+  someone downloaded in the last 30 minutes isn't downloaded again. Only downloads count toward the daily
+  scout limit, and if you're out of downloads, saved players still open.
+* **Shared cache, private notes.** Public Lichess/Chess.com games are stored once for everyone, which means
+  fewer requests to those sites. Your list, notes and tags stay private. PGN uploads (over-the-board
+  opponents) are private to you and deleted with your account.
+* **Explorer (position search).** Tick several players and play moves on the board, or paste a FEN. You
+  see every saved game that reached the position, **by any move order**, with each next move's games,
+  White/Draw/Black split and the players' score. Click a row to follow it; click a game to replay it.
+  Every position up to move 40 is indexed by its Zobrist hash (the key opening books use).
+* **Games.** Filter by colour, result, time control, opening, opponent and date. Open any game on the board,
+  copy its PGN, or **export the selection as one PGN for ChessBase**.
+* **Each player's page.** Scouting report, notes, tags (e.g. "club", "round 3"), Update and Remove.
+* **Limits.** Pro saves 150 players, Coach 500 (`library_players` in `app/plans.py`). Free has no library.
+* **Size.** About 6.5 KB per game with its position index: 20,000 games is about 130 MB. On that size a
+  position search takes 10–130 ms.
+
+The Library and Scout don't need your own chess account linked.
+
 ## New in v0.7: ready for real users
 
 * **Security.** Writes from other websites are refused (Origin / Sec-Fetch-Site check on top of SameSite
@@ -255,6 +279,7 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 | `app/auth.py` / `app/plans.py` / `app/store.py` | Accounts & sessions, plan limits, SQLite |
 | `app/main.py` | HTTP API with ownership and plan checks |
 | `scripts/admin.py` | Users, upgrade requests, grant/revoke plans, kill switches, audit log, email checks |
+| `app/library.py` | Opponent Library: saved players, incremental updates, position index and search, PGN export |
 | `app/switches.py` | Kill switches stored in the database, read by every process |
 | `app/legal.py` | Privacy policy, terms and refund policy pages |
 | `RUNBOOK.md` | Incidents, kill switches, restores, releases and rollbacks |
@@ -263,7 +288,7 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 
 ```bash
 pip install -r requirements-dev.txt
-pytest        # 238 tests; engine tests skip if Stockfish is missing
+pytest        # 250 tests; engine tests skip if Stockfish is missing
 ruff check .
 ```
 

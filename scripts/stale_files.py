@@ -52,6 +52,7 @@ app/knowledge/principles/opening-principles.md
 app/knowledge/principles/repertoire-maintenance.md
 app/knowledge/principles/rook-endgames.md
 app/legal.py
+app/library.py
 app/llm.py
 app/mailer.py
 app/main.py
@@ -94,6 +95,7 @@ app/static/js/support.js
 app/static/js/views/coach.js
 app/static/js/views/common.js
 app/static/js/views/diagnose.js
+app/static/js/views/library.js
 app/static/js/views/prepare.js
 app/static/js/views/students.js
 app/static/js/views/train.js
@@ -150,6 +152,7 @@ tests/test_coach_dashboard.py
 tests/test_core.py
 tests/test_email.py
 tests/test_jobs.py
+tests/test_library.py
 tests/test_okf.py
 tests/test_ops.py
 tests/test_prep.py

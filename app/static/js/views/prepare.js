@@ -1,14 +1,17 @@
-// Prepare: Prep Check (your ChessBase repertoire vs your games) and Opponent Scout. Both Pro.
+// Prepare: Prep Check (your ChessBase repertoire vs your games), Opponent Scout and the Opponent Library. All Pro.
 
 import { S, account, api, del, el, fill, hasFeature, post, showErr, sleep, toast, track, upload } from "../core.js";
 import { areaTabs, lockCard, openPosition, sampleRows, table } from "./common.js";
+import * as library from "./library.js";
 
 export function render(main, sub) {
   const head = el("div", { class: "page-head" }, el("div", {}, el("h1", { text: "Prepare" }),
-    el("p", { class: "sub", text: "Check your preparation against how you really play, and scout your next opponent." })));
+    el("p", { class: "sub", text: "Check your preparation against how you really play, scout your next opponent, and keep every opponent in one searchable library." })));
   const body = el("div");
-  main.replaceChildren(head, areaTabs("prepare", sub, [["", "Prep Check", !hasFeature("prep")], ["scout", "Opponent Scout", !hasFeature("scout")]]), body);
+  main.replaceChildren(head, areaTabs("prepare", sub, [["", "Prep Check", !hasFeature("prep")], ["scout", "Opponent Scout", !hasFeature("scout")],
+    ["library", "Opponent Library", !hasFeature("scout")]]), body);
   if (sub === "scout") scout(body);
+  else if (sub === "library") library.render(body);
   else prepCheck(body);
 }
 
@@ -122,6 +125,7 @@ async function scout(body) {
   const err = el("p", { class: "err", role: "alert", hidden: true });
   const btn = el("button", { class: "btn", type: "submit", text: "Scout them" });
   const out = el("div", { class: "stack-lg" });
+  const chips = el("div");
   const form = el("form", { class: "form-row" },
     el("div", { class: "field narrow" }, el("label", { for: "scPlat", text: "Where they play" }), plat),
     el("div", { class: "field" }, el("label", { for: "scHandle", text: "Their username" }), handle), btn);
@@ -132,25 +136,32 @@ async function scout(body) {
     btn.disabled = true;
     out.replaceChildren(el("p", { class: "muted", text: "Downloading their last 100 rated games and building the report…" }));
     try {
-      const r = await post("/api/scout", { platform: plat.value, handle: handle.value.trim(), account_id: a.games ? a.id : null });
+      const r = await post("/api/scout", { platform: plat.value, handle: handle.value.trim(), account_id: a && a.games ? a.id : null });
       track("Scout report");
       scoutReport(out, r);
+      if (r.downloaded) toast(`Saved ${r.player.handle} to your Opponent Library (${r.player.games} games).`);
     } catch (ex) { out.replaceChildren(); showErr(err, ex.message); }
     finally { btn.disabled = false; }
   });
   body.replaceChildren(el("div", { class: "stack-lg" },
     el("section", { class: "sheet stack" }, el("h2", { text: "Who are you playing next?" }), form, err,
-      el("p", { class: "small muted", text: `Uses their last 100 rated games. Your own games show where your openings meet theirs. ${S.me.usage_today.scout} of ${S.me.limits.scouts_per_day} reports used today.` })),
+      el("p", { class: "small muted", text: `Uses their last 100 rated games and saves them to your Opponent Library, so next time they open instantly. Your own games show where your openings meet theirs. ${S.me.usage_today.scout} of ${S.me.limits.scouts_per_day} downloads used today.` }),
+      chips),
     out));
+  library.savedChips(async (p) => {
+    out.replaceChildren(el("p", { class: "muted", text: `Opening ${p.handle} from your library…` }));
+    try { scoutReport(out, await api(`/api/library/${p.id}/report?games=100${a && a.games ? `&account_id=${a.id}` : ""}`)); }
+    catch (ex) { out.replaceChildren(el("p", { class: "err", text: ex.message })); }
+  }).then((node) => { if (node) chips.replaceChildren(node); });
 }
 
-function scoutReport(out, r) {
+export function scoutReport(out, r) {
   const h = r.habits || {};
   const sideCols = [["They're", (x) => x.their_color], ["Line", (x) => x.line, "num"], ["Games", (x) => x.games, "num"], ["Their score", (x) => `${x.their_score_pct}%`, "num"]];
   const lineCols = [["Line", (x) => x.line, "num"], ["Games", (x) => x.games, "num"], ["Share", (x) => `${x.share_pct}%`, "num"], ["Their score", (x) => `${x.their_score_pct}%`, "num"]];
   const sec = (title, node, sub) => el("section", { class: "sheet stack" }, el("h3", { text: title }), sub ? el("p", { class: "small muted", text: sub }) : null, node);
   fill(out,
-    el("section", { class: "sheet stack" }, el("p", { class: "small faint", text: `Scouting report from ${r.games} games` }), el("h2", { text: r.opponent }),
+    el("section", { class: "sheet stack" }, el("p", { class: "small faint", text: `Scouting report from ${r.games} games${r.player ? ` · saved in your library, updated ${r.player.fetched_at ? new Date(r.player.fetched_at * 1000).toLocaleDateString() : "–"}` : ""}` }), el("h2", { text: r.opponent }),
       el("ul", { class: "notes" }, ...r.insights.map((t) => el("li", { text: t })))),
     r.steer_into.length ? sec("Steer into these lines", table(sideCols, r.steer_into), "They score badly here.") : null,
     r.avoid.length ? sec("Avoid these lines", table(sideCols, r.avoid), "Their best results.") : null,

@@ -5,19 +5,21 @@ import { $, S, api, el, openDialog, svg, toast, track } from "../core.js";
 import { Board, boardSettings, sideToMove, uciArrow } from "../board.js";
 
 // ---------------- game viewer ----------------
-export async function openGame(gameId, accountId = S.accountId) {
+export async function openGame(gameId, accountId = S.accountId, url = null) {
   const dlg = $("#boardDlg");
   $("#boardTitle").textContent = "Loading game…";
   $("#boardSub").textContent = "";
   $("#boardBody").replaceChildren(el("p", { class: "muted", text: "Fetching the moves…" }));
   openDialog(dlg);
   let g;
-  try { g = await api(`/api/accounts/${accountId}/game/${encodeURIComponent(gameId)}`); }
+  try { g = await api(url || `/api/accounts/${accountId}/game/${encodeURIComponent(gameId)}`); }
   catch (e) { $("#boardBody").replaceChildren(el("p", { class: "err", text: e.message })); return; }
   track("Game opened");
   const resultWord = g.result === "1/2-1/2" ? "Draw" : (g.result === "1-0") === (g.color === "white") ? "Won" : "Lost";
-  $("#boardTitle").textContent = `${g.color === "white" ? "You" : g.opponent} vs ${g.color === "white" ? g.opponent : "you"}`;
-  $("#boardSub").textContent = `${resultWord}, ${g.opening}, ${g.played_at}${g.accuracy != null ? `. Your accuracy ${g.accuracy}%` : ""}`;
+  $("#boardTitle").textContent = g.title || `${g.color === "white" ? "You" : g.opponent} vs ${g.color === "white" ? g.opponent : "you"}`;
+  $("#boardSub").textContent = g.library
+    ? `${g.result} (${g.player} ${resultWord === "Draw" ? "drew" : resultWord.toLowerCase()}), ${g.opening}, ${g.played_at}${g.time_class ? `, ${g.time_class}` : ""}`
+    : `${resultWord}, ${g.opening}, ${g.played_at}${g.accuracy != null ? `. Your accuracy ${g.accuracy}%` : ""}`;
   const marks = new Map(g.marks.map((m) => [m.ply, m]));
   const boardHost = el("div");
   const board = new Board(boardHost, { fen: g.fens[0], orientation: g.color });
@@ -78,10 +80,15 @@ export async function openGame(gameId, accountId = S.accountId) {
     counter, boardSettings(board));
   const jump = g.marks.filter((m) => (m.ply % 2 === 0 ? "white" : "black") === myColor).sort((a, b) => b.win_loss - a.win_loss)[0];
   const side = el("div", { class: "stack" },
-    el("p", { class: "small muted" }, "Your moves are in blue ink. ", el("span", { class: "hand", style: { fontSize: "1.15rem", margin: "0 3px 0 2px" }, text: "?" }),
-      "\u00a0marks a mistake; click it to see the engine's move."),
+    g.library ? el("p", { class: "small muted", text: `${g.player}'s moves are in blue ink.` })
+      : el("p", { class: "small muted" }, "Your moves are in blue ink. ", el("span", { class: "hand", style: { fontSize: "1.15rem", margin: "0 3px 0 2px" }, text: "?" }),
+        "\u00a0marks a mistake; click it to see the engine's move."),
     sheet, note,
     jump ? el("button", { class: "btn quiet small", type: "button", text: "Jump to my costliest mistake", onclick: () => go(jump.ply + 1) }) : null,
+    g.pgn ? el("button", { class: "btn quiet small", type: "button", text: "Copy PGN", onclick: async () => {
+      try { await navigator.clipboard.writeText(g.pgn); toast("PGN copied. Paste it into ChessBase or any chess app."); }
+      catch { toast("Couldn't copy: your browser blocked the clipboard."); }
+    } }) : null,
     g.url ? el("a", { class: "small", href: g.url, target: "_blank", rel: "noopener", text: "Open on the original site" }) : null);
   $("#boardBody").replaceChildren(el("div", { class: "viewer" }, el("div", {}, boardHost, controls), side));
   dlg.onkeydown = (e) => {
