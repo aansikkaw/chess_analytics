@@ -77,6 +77,60 @@ from your own domain instead (Brevo or another provider, see DEPLOY.md).
 
 To give yourself Pro while testing, add a Codespaces secret `ADMIN_EMAILS` with your email *before* you sign up. Or grant it afterwards with `python scripts/admin.py grant you@example.com`.
 
+## New in v0.9: Opponent Twin (practise against a bot that plays like them)
+
+Prepare → Opponent Library → pick a player → **Play their Twin**.
+
+**How it picks a move**
+1. **Their own book.** If they've reached the position before (any move order), it replays what *they*
+   chose, weighting recent games more. It trusts the book in proportion to the evidence: one past game is
+   followed 40% of the time, five games 83%. **Rehearse their main lines** makes it always play their
+   most common move while in book.
+2. **Their decision model.** Out of book, Stockfish lists the top 10 moves plus 2 random legal moves (humans
+   do play bad moves). Each candidate gets features: expected-score loss (separately for opening,
+   middlegame, endgame and time trouble), engine rank, capture, even trade, recapture, check, castling,
+   pawn push, developing move, moving an attacked piece away, forward and king-hunting piece moves, early
+   queen moves, moving the same piece twice, king walks. A **conditional-logit choice model fitted to
+   this player's own decisions** (maximum likelihood, Newton's method with a line search, and a rating-based
+   prior so small samples stay sensible) turns those into probabilities, and the Twin samples from them.
+   That reproduces how often they err, in which phase, and what they prefer when moves are close.
+
+**How it's built.** A background job replays up to 40 of their games. At each of their moves it scores
+the candidates with Stockfish (depth 9) and records what they played: about 30 decisions per game,
+1,000+ in total. It fits on 80% of the games and tests on the other 20%. The **faithfulness** score
+compares how often their real move is among the Twin's top-3 (and top-1) choices with the same for
+Stockfish. Then it refits on everything. The profile shows:
+- accuracy by phase, blunders and mistakes per 100 moves, and time-trouble accuracy;
+- style traits, shown only when the data supports them (at least 3 standard errors from the prior);
+- castling habits and their openings.
+
+**Playing.** You pick a colour and the Twin's strength: "Exactly like them", or "On a good day" (fewer
+mistakes, same openings and style). After every Twin move the panel shows why it chose it ("their book: 7
+of 9 games…" or "their model: 34% likely…") and what else it considered. Take back, resign and a new game
+are available. **Review the game** gives your accuracy against the Twin's, your costliest moves on the board,
+and the move where the game left their own games. Games are kept in your browser, so you can continue
+later.
+
+**Validation** (`python scripts/twin_validate.py`). This is a parameter-recovery test. Personas with
+known habits play 30 games against Stockfish, and a Twin is built from those games alone:
+
+| Persona | Habit recovered | Their move in Twin's top 1 / top 3 | Stockfish top 1 / top 3 |
+|---|---|---|---|
+| Trader (loves even trades) | trade weight 1.39 (set 2.0), capture 1.13 (set 1.0) | 40% / 68% | 32% / 65% |
+| Attacker (checks, goes for the king) | check 1.52 (set 1.5), king-hunt 1.08 (set 2.5) | 39% / 65% | 34% / 56% |
+| Weak in endgames | endgame accuracy weight 0.1 vs middlegame 1.9 | 26% / 60% | 27% / 57% |
+
+This tests the fitting machinery. On a real opponent, the faithfulness score shown in the app is the
+honest number.
+
+**Limits and safety.**
+- Building needs 10+ games, and you can build from chosen time controls only, since openings differ by speed.
+- Pro gets 10 builds a day and Coach 30. A Twin built in the last day (with no new games since) is reused,
+  and a Twin of a public player is shared by everyone who saved that player.
+- Moves and reviews are rate-limited, and the `twin` kill switch pauses everything.
+- It's a practice bot inside the app, built from public games. It never runs during live games.
+- Settings: `TWIN_GAMES` (40), `TWIN_DEPTH` (9).
+
 ## New in v0.8: Opponent Library (your own Mega Database of opponents)
 
 Prepare → **Opponent Library**. Every player you scout is saved with their games, like a ChessBase database:
@@ -279,6 +333,7 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 | `app/auth.py` / `app/plans.py` / `app/store.py` | Accounts & sessions, plan limits, SQLite |
 | `app/main.py` | HTTP API with ownership and plan checks |
 | `scripts/admin.py` | Users, upgrade requests, grant/revoke plans, kill switches, audit log, email checks |
+| `app/twin.py` | Opponent Twin: features, choice-model fitting, book, building, move choice |
 | `app/library.py` | Opponent Library: saved players, incremental updates, position index and search, PGN export |
 | `app/switches.py` | Kill switches stored in the database, read by every process |
 | `app/legal.py` | Privacy policy, terms and refund policy pages |
@@ -288,7 +343,7 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 
 ```bash
 pip install -r requirements-dev.txt
-pytest        # 250 tests; engine tests skip if Stockfish is missing
+pytest        # 258 tests; engine tests skip if Stockfish is missing
 ruff check .
 ```
 

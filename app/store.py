@@ -204,6 +204,18 @@ CREATE TABLE IF NOT EXISTS library (   -- the players each user has saved
     opened_at   REAL,
     PRIMARY KEY (user_id, player_id)
 );
+CREATE TABLE IF NOT EXISTS twins (   -- Opponent Twins: a fitted move-choice model per library player (app/twin.py)
+    player_id   INTEGER NOT NULL,
+    tc_key      TEXT NOT NULL,          -- which time controls it was built from ("all" or e.g. "blitz,rapid")
+    version     INTEGER NOT NULL,
+    built_at    REAL NOT NULL,
+    games       INTEGER NOT NULL,
+    decisions   INTEGER NOT NULL,
+    newest_game TEXT NOT NULL DEFAULT '',
+    params      TEXT NOT NULL,          -- the model's weights (JSON)
+    profile     TEXT NOT NULL,          -- accuracy, style, openings, faithfulness (JSON)
+    PRIMARY KEY (player_id, tc_key)
+);
 CREATE TABLE IF NOT EXISTS kv (
     k          TEXT PRIMARY KEY,
     v          TEXT NOT NULL,
@@ -519,6 +531,7 @@ class Store:
             for (pid,) in c.execute("SELECT id FROM lib_players WHERE owner_id = ?", (user_id,)).fetchall():  # private PGN players
                 c.execute("DELETE FROM lib_positions WHERE game_ref IN (SELECT id FROM lib_games WHERE player_id = ?)", (pid,))
                 c.execute("DELETE FROM lib_games WHERE player_id = ?", (pid,))
+                c.execute("DELETE FROM twins WHERE player_id = ?", (pid,))
                 c.execute("DELETE FROM lib_players WHERE id = ?", (pid,))
             c.execute("DELETE FROM users WHERE id = ?", (user_id,))
         return accounts

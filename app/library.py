@@ -190,6 +190,7 @@ class Library:
     def _delete_player(c, player_id: int) -> None:
         c.execute("DELETE FROM lib_positions WHERE game_ref IN (SELECT id FROM lib_games WHERE player_id = ?)", (player_id,))
         c.execute("DELETE FROM lib_games WHERE player_id = ?", (player_id,))
+        c.execute("DELETE FROM twins WHERE player_id = ?", (player_id,))
         c.execute("DELETE FROM lib_players WHERE id = ?", (player_id,))
 
     def delete_user(self, user_id: int) -> None:

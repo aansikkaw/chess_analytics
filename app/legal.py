@@ -41,6 +41,8 @@ and how you can see, download or delete it. Plateau Breaker is for people aged 1
 <li><b>Chess usernames you link</b> and the <b>public games</b> we download from Lichess or Chess.com for them, or PGN files you upload.</li>
 <li><b>What we work out from your games:</b> engine analysis, skill ratings, puzzles, repertoire reports and your training progress.</li>
 <li><b>Questions you ask the AI coach</b> and its answers, and how many you ask each day (for plan limits).</li>
+<li><b>Opponent Library and Twins:</b> public games of players you scout, and practice bots (Twins) fitted to
+those games. Games you upload for an over-the-board opponent stay private to you.</li>
 <li><b>Coach rosters:</b> if you're a coach, the names and chess usernames of students you add, notes you write and homework you set.</li>
 <li><b>Support messages</b> you send us.</li>
 <li><b>Technical data:</b> your IP address (to stop abuse such as password guessing), error reports, and, if enabled,

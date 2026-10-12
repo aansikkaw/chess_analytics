@@ -99,6 +99,7 @@ app/static/js/views/library.js
 app/static/js/views/prepare.js
 app/static/js/views/students.js
 app/static/js/views/train.js
+app/static/js/views/twin.js
 app/static/manifest.webmanifest
 app/static/pieces/chessnut/LICENSE-2.0.txt
 app/static/pieces/chessnut/NOTICE.txt
@@ -122,6 +123,7 @@ app/status.py
 app/store.py
 app/switches.py
 app/sync.py
+app/twin.py
 app/worker.py
 deploy/.env.example
 deploy/Caddyfile
@@ -144,6 +146,7 @@ scripts/make_demo_pgn.py
 scripts/setup_ollama.sh
 scripts/stale_files.py
 scripts/start_ollama.sh
+scripts/twin_validate.py
 tests/__init__.py
 tests/conftest.py
 tests/test_api.py
@@ -159,6 +162,7 @@ tests/test_prep.py
 tests/test_pro.py
 tests/test_production.py
 tests/test_sources.py
+tests/test_twin.py
 """.split())
 
 

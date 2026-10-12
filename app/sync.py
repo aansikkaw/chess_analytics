@@ -153,7 +153,7 @@ class Importer:
 
     def handlers(self) -> dict[str, Callable]:
         return {"import": self.handle_import, "autosync": self.handle_import, "prep": self.handle_prep,
-                "preview": self.handle_preview}
+                "preview": self.handle_preview, "twin": self.handle_twin}
 
     # ---- import ----------------------------------------------------------------------------
     def _fetch(self, account: dict, p: dict) -> list[GameRecord]:
@@ -258,6 +258,23 @@ class Importer:
         ctx.progress(stage="Updating your knowledge bundle")
         self.knowledge.rebuild(account, f"**Update**: Checked repertoire '{rep['name']}' ({rep['color']}).")
         return {"repertoire_id": rep["id"], "drills": len(report["drills"])}
+
+    # ---- Opponent Twin: fit a practice bot to a library player's games ------------------------------
+    def handle_twin(self, job: dict, ctx) -> dict:
+        from . import twin as twin_mod
+        from .library import Library
+
+        p = job["payload"]
+        lib = Library(self.store)
+        if not lib.player(p["player_id"]):
+            raise JobError("That player was removed from the library.")
+        ctx.progress(stage="Reading their games")
+        try:
+            t = twin_mod.build(self.store, lib, p["player_id"], p.get("time_classes"), ctx.resources["engines"].main,
+                               max_games=self.settings.twin_games, depth=self.settings.twin_depth, progress=ctx.progress)
+        except ValueError as exc:
+            raise JobError(str(exc)) from exc
+        return {"player_id": p["player_id"], "tc_key": t["tc_key"], "games": t["games"], "decisions": t["decisions"]}
 
     # ---- instant preview (no account needed) ---------------------------------------------------
     def handle_preview(self, job: dict, ctx) -> dict:

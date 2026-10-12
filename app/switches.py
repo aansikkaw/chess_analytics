@@ -19,12 +19,14 @@ SWITCHES: dict[str, str] = {
     "signups": "New accounts",
     "chesscom": "Fetching games from Chess.com",
     "emails": "Sending email (when off, emails are saved to outbox/)",
+    "twin": "Opponent Twin practice games and builds",
 }
 PAUSED_MESSAGES = {
     "ai_coach": "The AI coach is paused for maintenance, so the built-in coach is answering.",
     "imports": "Syncing is paused for maintenance. Your games are safe; try again a little later.",
     "signups": "New accounts are paused for a short while. Please try again later.",
     "chesscom": "Chess.com syncing is paused for now. Lichess and PGN uploads still work.",
+    "twin": "Opponent Twins are paused for maintenance. Your library and reports still work.",
 }
 CACHE_S = 5.0
 _cache: dict[str, tuple[float, bool]] = {}

@@ -75,6 +75,27 @@ class Engine:
             self._cache[key] = result
         return result
 
+    def candidates(self, board: chess.Board, n: int, limit: chess.engine.Limit,
+                   moves: list[str] | None = None) -> list[tuple[str, int]]:
+        """The engine's top `n` moves (or a score for each of `moves`), best first, as (uci, centipawns for the
+        side to move, mates clamped to +/-MATE_CP). One search, so the scores are comparable."""
+        if board.is_game_over():
+            return []
+        kw = {"multipv": max(1, n)}
+        if moves:
+            kw = {"multipv": len(moves), "root_moves": [chess.Move.from_uci(m) for m in moves]}
+        with self._lock:
+            infos = self._engine.analyse(board, limit, **kw)
+        if isinstance(infos, dict):
+            infos = [infos]
+        out: list[tuple[str, int]] = []
+        for info in infos:
+            pv = info.get("pv")
+            if pv and "score" in info:
+                out.append((pv[0].uci(), info["score"].pov(board.turn).score(mate_score=MATE_CP)))
+        out.sort(key=lambda x: -x[1])
+        return out
+
     @staticmethod
     def _terminal_eval(board: chess.Board) -> PositionEval:
         if board.is_checkmate():

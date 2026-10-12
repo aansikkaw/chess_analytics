@@ -6,6 +6,7 @@ import { S, account, api, del, el, fill, hasFeature, patch, post, showErr, toast
 import { Board, applyMove, boardSettings } from "../board.js";
 import { lockCard, openGame, sampleRows, table } from "./common.js";
 import { scoutReport } from "./prepare.js";
+import * as twin from "./twin.js";
 
 const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const PLAT = { lichess: "Lichess", chesscom: "Chess.com", pgn: "PGN" };
@@ -138,14 +139,15 @@ function drawSide(side, main, body) {
 
 // ---------------- right: tabs ----------------
 function drawMain(main, body) {
-  const tabs = [["explore", "Explorer"], ["games", "Games"], ["player", L.open ? playerName(L.open) : "Player"]];
+  const tabs = [["explore", "Explorer"], ["games", "Games"], ["player", L.open ? playerName(L.open) : "Player"], ["twin", "Play their Twin"]];
   const nav = el("nav", { class: "tabs", "aria-label": "Library" }, ...tabs.map(([k, label]) =>
     el("a", { href: "#/prepare/library", "aria-current": L.tab === k ? "page" : null, text: label,
-      onclick: (e) => { e.preventDefault(); if (k === "player" && !L.open) { toast("Click a player's name on the left first."); return; } L.tab = k; drawMain(main, body); } })));
+      onclick: (e) => { e.preventDefault(); if ((k === "player" || k === "twin") && !L.open) { toast("Click a player's name on the left first."); return; } L.tab = k; drawMain(main, body); } })));
   const content = el("div", { class: "stack-lg" });
-  fill(main, nav, L.tab === "player" ? null : filtersBox(() => drawMain(main, body)), content);
+  fill(main, nav, L.tab === "player" || L.tab === "twin" ? null : filtersBox(() => drawMain(main, body)), content);
   if (L.tab === "explore") explorer(content);
   else if (L.tab === "games") gamesTab(content);
+  else if (L.tab === "twin") twin.render(content, L.data.players.find((p) => p.id === L.open));
   else playerTab(content, body);
 }
 const playerName = (id) => (L.data.players.find((p) => p.id === id) || {}).handle || "Player";
@@ -325,7 +327,9 @@ async function playerTab(content, body) {
       el("div", { class: "form-row" }, el("div", { class: "field" }, el("label", { for: "libTags", text: "Tags (comma-separated)" }), tags), save),
       el("div", { class: "row" },
         el("button", { class: "btn quiet small", type: "button", text: "Explore only this player", onclick: () => { L.selected = new Set([p.id]); L.tab = "explore"; render(body); } }),
-        el("button", { class: "btn quiet small", type: "button", text: "Their games", onclick: () => { L.selected = new Set([p.id]); L.tab = "games"; render(body); } }))),
+        el("button", { class: "btn quiet small", type: "button", text: "Their games", onclick: () => { L.selected = new Set([p.id]); L.tab = "games"; render(body); } }),
+        el("button", { class: "btn small", type: "button", text: twin.hasGame(p.id) ? "Continue your game vs their Twin" : "Practise against their Twin",
+          onclick: () => { L.tab = "twin"; render(body); } }))),
     report);
   const a = account();
   try {

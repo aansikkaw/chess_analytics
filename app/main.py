@@ -29,12 +29,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import auth
-from .analysis import win_percent
+from .analysis import classify, move_accuracy, win_percent
 from .coach import Coach, CoachTools
 from .config import load_settings
 from .engine import Engine, EngineUnavailable
 from .games import TIME_CLASSES, GameImportError, decode_upload, name_matches, parse_pgn, player_names, validate_pgn_name, validate_username
 from .jobs import JobQueue
+from . import twin as twin_mod
 from .library import ALL_CLASSES, Library, board_from, to_pgn
 from .llm import resolve_backends
 from .mailer import (MailError, Mailer, coach_invite_email, plan_request_admin_email, plan_request_email, reset_email, support_email,
@@ -82,6 +83,8 @@ analyse_limiter = auth.SharedLimiter(store, "analyse", limit=240, window=3600)  
 signup_limiter = auth.SharedLimiter(store, "signup", limit=settings.signups_per_hour, window=3600)
 test_email_limiter = auth.SharedLimiter(store, "test_email", limit=10, window=3600)
 export_limiter = auth.SharedLimiter(store, "export", limit=5, window=3600)
+twin_move_limiter = auth.SharedLimiter(store, "twin_move", limit=1500, window=3600)  # Twin moves per user per hour
+twin_review_limiter = auth.SharedLimiter(store, "twin_review", limit=40, window=3600)
 
 
 def audit(user: dict | None, action: str, target: str | None = None, **detail) -> None:
@@ -1222,6 +1225,187 @@ def library_export(request: Request, user: dict = Depends(library_user)) -> Resp
     names = [library.player(i)["handle"] for i in ids[:3]]
     fname = ("-".join(names) + ("-and-more" if len(ids) > 3 else "") or "library").replace(" ", "_")[:60]
     return Response(text, media_type="application/x-chess-pgn", headers={"Content-Disposition": f'attachment; filename="{fname}.pgn"'})
+
+
+# ---- Opponent Twin: practise against a model of a specific opponent -----------------------------------
+class TwinBuild(BaseModel):
+    time_classes: list[str] | None = Field(None, max_length=4)
+
+
+class TwinMove(BaseModel):
+    moves: list[str] = Field(default_factory=list, max_length=600)
+    time_classes: list[str] | None = Field(None, max_length=4)
+    mode: str = Field("faithful", pattern="^(faithful|good_day)$")
+    main_line: bool = False  # rehearse: always their most common move while in their book
+
+
+class TwinReview(BaseModel):
+    moves: list[str] = Field(..., min_length=1, max_length=600)
+    color: str = Field(..., pattern="^(white|black)$")
+    time_classes: list[str] | None = Field(None, max_length=4)
+
+
+def _twin_allowed() -> None:
+    if not switches.is_on(store, "twin"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["twin"])
+
+
+def _twin_classes(classes: list[str] | None) -> list[str]:
+    return [c for c in (classes or []) if c in twin_mod.TIME_CLASSES]
+
+
+def _twin_view(t: dict | None, player: dict, classes: list[str]) -> dict | None:
+    if not t:
+        return None
+    with store._conn() as c:
+        sql = "SELECT COUNT(*), MAX(played_at) FROM lib_games WHERE player_id = ?"
+        args: list = [player["id"]]
+        if classes:
+            sql += f" AND time_class IN ({','.join('?' * len(classes))})"
+            args += classes
+        count, newest = c.execute(sql, args).fetchone()
+    stale = bool(newest and newest > t["newest_game"]) and (count or 0) - t["games"] >= 0
+    return {k: t[k] for k in ("tc_key", "built_at", "games", "decisions", "newest_game", "profile")} | {"stale": stale, "games_available": count}
+
+
+@app.get("/api/twin/{player_id}")
+def twin_status(player_id: int, tc: str = "", user: dict = Depends(library_user)) -> dict:
+    player = _owned_library_player(user, player_id)
+    classes = _twin_classes(tc.split(",") if tc else None)
+    key = twin_mod.tc_key(classes)
+    job = queue.find_recent("twin", f"{player_id}:{key}", 3600)
+    active = job["id"] if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"] else None
+    with store._conn() as c:
+        sql = "SELECT COUNT(*) FROM lib_games WHERE player_id = ?"
+        args: list = [player_id]
+        if classes:
+            sql += f" AND time_class IN ({','.join('?' * len(classes))})"
+            args += classes
+        games = c.execute(sql, args).fetchone()[0]
+    left = max(0, plan_of(user).get("twin_builds_per_day", 0) - store.usage_today(user["id"], "twin_build"))
+    return {"player": library.entry(user["id"], player_id), "tc_key": key, "twin": _twin_view(twin_mod.load(store, player_id, key), player, classes),
+            "job_id": active, "games": games, "min_games": twin_mod.MIN_GAMES, "builds_left": left,
+            "engine": state["engine"] is not None}
+
+
+@app.post("/api/twin/{player_id}/build")
+def twin_build(player_id: int, body: TwinBuild, user: dict = Depends(library_user)) -> dict:
+    _twin_allowed()
+    player = _owned_library_player(user, player_id)
+    classes = _twin_classes(body.time_classes)
+    key = twin_mod.tc_key(classes)
+    existing = _twin_view(twin_mod.load(store, player_id, key), player, classes)
+    if existing and not existing["stale"] and time.time() - existing["built_at"] < 86_400:
+        return {"job_id": None, "message": "This Twin is already up to date.", "twin": existing}
+    job = queue.find_recent("twin", f"{player_id}:{key}", 3600)
+    if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"]:
+        return {"job_id": job["id"], "message": "Already building."}
+    spend(user, "twin_build", plan_of(user).get("twin_builds_per_day", 0))
+    job_id = jobs.submit("twin", {"player_id": player_id, "time_classes": classes, "key": f"{player_id}:{key}"}, user["id"])
+    audit(user, "twin_built", f"library:{player_id}", time_classes=key)
+    return {"job_id": job_id, "message": f"Building {player['handle']}'s Twin. It studies their games with the engine: usually 1-2 minutes."}
+
+
+def _twin_or_404(player_id: int, classes: list[str]) -> dict:
+    t = twin_mod.load(store, player_id, twin_mod.tc_key(classes))
+    if not t:
+        raise HTTPException(404, "Build this Twin first.")
+    return t
+
+
+def _game_over(board: chess.Board) -> dict | None:
+    outcome = board.outcome(claim_draw=True)
+    if not outcome:
+        return None
+    reason = {chess.Termination.CHECKMATE: "checkmate", chess.Termination.STALEMATE: "stalemate",
+              chess.Termination.INSUFFICIENT_MATERIAL: "insufficient material", chess.Termination.THREEFOLD_REPETITION: "repetition",
+              chess.Termination.FIFTY_MOVES: "the 50-move rule", chess.Termination.FIVEFOLD_REPETITION: "repetition",
+              chess.Termination.SEVENTYFIVE_MOVES: "the 75-move rule"}.get(outcome.termination, "the rules")
+    return {"result": outcome.result(), "reason": reason}
+
+
+@app.post("/api/twin/{player_id}/move")
+def twin_move(player_id: int, body: TwinMove, user: dict = Depends(library_user)) -> dict:
+    """The Twin's reply to a game so far (moves from the start, UCI or SAN). Stateless: the browser keeps the game."""
+    _twin_allowed()
+    _owned_library_player(user, player_id)
+    key = f"user:{user['id']}"
+    if twin_move_limiter.blocked(key):
+        raise HTTPException(429, "That's a lot of moves this hour. Take a short break and play again soon.")
+    twin_move_limiter.fail(key)
+    engine = state["engine"]
+    if engine is None:
+        raise HTTPException(503, "Stockfish isn't running on this server, so the Twin can't think right now.")
+    classes = _twin_classes(body.time_classes)
+    t = _twin_or_404(player_id, classes)
+    try:
+        board = board_from(body.moves)
+    except ValueError as exc:
+        raise HTTPException(400, "Those moves aren't legal.") from exc
+    over = _game_over(board)
+    if over:
+        return {"over": over, "fen": board.fen()}
+    ucis = [m.uci() for m in board.move_stack]
+    prev_to = chess.Move.from_uci(ucis[-2]).to_square if len(ucis) >= 2 else None
+    opp_to = chess.Move.from_uci(ucis[-1]).to_square if ucis else None
+    pick = twin_mod.choose(store, t, board, engine, classes=classes, mode=body.mode, main_line=body.main_line, prev_to=prev_to, opp_to=opp_to,
+                           depth=settings.twin_depth)
+    board.push(chess.Move.from_uci(pick["uci"]))
+    return pick | {"fen": board.fen(), "over": _game_over(board)}
+
+
+@app.post("/api/twin/{player_id}/review")
+def twin_review(player_id: int, body: TwinReview, user: dict = Depends(library_user)) -> dict:
+    """After a practice game: your accuracy and mistakes, the Twin's accuracy, and where the game left their book."""
+    _owned_library_player(user, player_id)
+    key = f"user:{user['id']}"
+    if twin_review_limiter.blocked(key):
+        raise HTTPException(429, "That's a lot of reviews this hour. Try again later.")
+    twin_review_limiter.fail(key)
+    engine = state["engine"]
+    if engine is None:
+        raise HTTPException(503, "Stockfish isn't running on this server, so games can't be reviewed right now.")
+    try:
+        board = board_from(body.moves)
+    except ValueError as exc:
+        raise HTTPException(400, "Those moves aren't legal.") from exc
+    moves = list(board.move_stack)[:240]
+    you = chess.WHITE if body.color == "white" else chess.BLACK
+    classes = _twin_classes(body.time_classes)
+    limit = chess.engine.Limit(depth=10, time=0.05)
+    b = chess.Board()
+    evals = [engine.evaluate(b, limit)]
+    for mv in moves:
+        b.push(mv)
+        evals.append(engine.evaluate(b, limit))
+    b = chess.Board()
+    yours, theirs, mistakes = [], [], []
+    left_book = None
+    for ply, mv in enumerate(moves):
+        mover = b.turn
+        before = win_percent(evals[ply].cp_for(mover))
+        after = win_percent(evals[ply + 1].cp_for(mover))
+        acc = move_accuracy(before, after)
+        if mover == you:
+            yours.append(acc)
+            label = classify(before - after)
+            if label in ("inaccuracy", "mistake", "blunder"):
+                best = evals[ply].best_move
+                mistakes.append({"ply": ply, "move": f"{ply // 2 + 1}{'.' if mover == chess.WHITE else '...'}{b.san(mv)}",
+                                 "classification": label, "win_loss": round(before - after, 1), "fen": b.fen(), "played_uci": mv.uci(),
+                                 "best_uci": best, "best": b.san(chess.Move.from_uci(best)) if best else None})
+        else:
+            theirs.append(acc)
+            if left_book is None and not twin_mod.book(store, player_id, b, classes):
+                line = chess.Board().variation_san(moves[:ply]).replace(". ", ".") if ply else ""
+                if ply > 10:
+                    line = "… " + " ".join(line.split()[-7:])
+                left_book = {"move": ply // 2 + 1, "after": line}
+        b.push(mv)
+    mean = lambda xs: round(sum(xs) / len(xs), 1) if xs else None  # noqa: E731
+    mistakes.sort(key=lambda m: -m["win_loss"])
+    return {"your_accuracy": mean(yours), "twin_accuracy": mean(theirs), "mistakes": mistakes[:6],
+            "left_book": left_book, "moves": len(moves), "over": _game_over(board)}
 
 
 # ---- file upload (ChessBase / any PGN) -------------------------------------------------------

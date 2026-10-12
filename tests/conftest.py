@@ -16,7 +16,9 @@ os.environ.setdefault("ENGINE_TIME", "0.02")
 os.environ.setdefault("MAX_GAMES", "3")
 os.environ["ENABLE_AUTOSYNC"] = "0"
 os.environ["SIGNUPS_PER_HOUR"] = "100000"  # the suite signs up many users from one address
-os.environ["JOB_MODE"] = "inline"  # jobs run to completion inside the request, so tests see results at once
+os.environ["JOB_MODE"] = "inline"
+os.environ.setdefault("TWIN_GAMES", "12")  # Opponent Twin builds study fewer games, at low depth, in tests
+os.environ.setdefault("TWIN_DEPTH", "4")  # jobs run to completion inside the request, so tests see results at once
 os.environ.pop("SENTRY_DSN", None)
 # Never send real email from the test suite, even inside a codespace that has email secrets set.
 for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_SECURITY", "SMTP_FROM", "EMAIL_FROM",

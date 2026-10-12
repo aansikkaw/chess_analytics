@@ -52,6 +52,8 @@ class Settings:
     preview_games: int = 15
     preview_depth: int = 8
     preview_time: float = 0.03
+    twin_games: int = 40  # games studied when building an Opponent Twin
+    twin_depth: int = 9  # engine depth for the Twin's candidate moves (when building and when playing)
     previews_per_hour: int = 6  # per IP address
     signups_per_hour: int = 10  # per IP address
     public_url: str = "http://localhost:8000"  # used in email links; detected automatically in Codespaces
@@ -77,7 +79,7 @@ class Settings:
     plausible_src: str = "https://plausible.io/js/script.tagged-events.js"
     posthog_key: str | None = None
     posthog_host: str = "https://eu.i.posthog.com"
-    app_version: str = "0.8.0"
+    app_version: str = "0.9.0"
 
 
 def _public_url() -> str:
@@ -121,6 +123,8 @@ def load_settings() -> Settings:
         preview_games=max(3, min(40, int(os.getenv("PREVIEW_GAMES", "15")))),
         preview_depth=int(os.getenv("PREVIEW_DEPTH", "8")),
         preview_time=float(os.getenv("PREVIEW_TIME", "0.03")),
+        twin_games=max(10, int(os.getenv("TWIN_GAMES", "40"))),
+        twin_depth=max(3, int(os.getenv("TWIN_DEPTH", "9"))),
         previews_per_hour=int(os.getenv("PREVIEWS_PER_HOUR", "6")),
         signups_per_hour=int(os.getenv("SIGNUPS_PER_HOUR", "10")),
         public_url=_public_url(),
