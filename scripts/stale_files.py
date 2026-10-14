@@ -20,6 +20,7 @@ RELEASE = set("""
 .github/dependabot.yml
 .github/workflows/ci.yml
 .gitignore
+.mcp.json
 CLAUDE.md
 DEPLOY.md
 Dockerfile
