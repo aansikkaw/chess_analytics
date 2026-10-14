@@ -10,28 +10,9 @@ An AI chess coach that learns from **your own games**. Link your Lichess or Ches
 6. Import **ChessBase** games (export to PGN), and with Pro, run **Prep Check**: compare your ChessBase repertoire with the games you actually played.
 7. **Mark any game like a test paper:** photograph a scoresheet or paste a game and get a **report card**: every move of both players classified by Stockfish, grades by phase, key moments on the board, the opening's name, a written review from the coach, and an annotated PGN. No ChessBase needed.
 
-**Pro features:** Prep Check, Opponent Scout, Repertoire Leaks (including recurring mistakes), Progress tracking and Auto-sync.
-
-## What's new in v0.5
-
-* **New interface** built around four jobs: **Diagnose, Train, Prepare, Coach** (bottom tab bar on phones).
-  "Your scoresheet, marked up by a coach": blue ink is you, red pen is the coach.
-* **Instant preview on the landing page:** type a Lichess username, get a Rating DNA from the last 15 games
-  in about half a minute, no account needed. Signing up from there links that account and starts the full import.
-* **Interactive board** everywhere: drag or click to move (or type the move), arrows for your move and the
-  engine's, and a **game viewer** with a scoresheet that jumps to your costliest mistake.
-* **Shareable Rating DNA card** (PNG for WhatsApp/Instagram/X), **Pro previews** that show real counts from
-  your games ("10 opening lines to check") instead of hidden tabs, and coach answers with the cited positions on boards.
-* **Installable app (PWA)**, dark mode, self-hosted fonts (no Google requests).
-* **Job queue:** imports, Prep Checks and previews run on a persistent, fair queue. Long imports go in chunks
-  of 20 newest-first, so the dashboard fills in after the first chunk; previews have their own fast lane.
-* **Email verification and password reset**, a **support form**, **account deletion**, a **weekly digest email**.
-* **Second model provider** (`LLM_FALLBACK_*`) tried before the offline coach.
-* **Sentry** error monitoring, **Plausible/PostHog** analytics, a public **status page** at `/status`.
-* **Daily backups** to S3-compatible storage (optionally encrypted) with a **weekly restore test**.
-* **Production deployment** in `deploy/`: Caddy (automatic HTTPS), Docker Compose with separate web,
-  worker and scheduler services, a VPS setup script and systemd units. See **DEPLOY.md**.
-* **Plans:** Free, Pro, **Event Pass** (Pro for 10 days: `scripts/admin.py grant EMAIL --days 10`) and a Coach waitlist.
+**Pro features:** Prep Check, Opponent Scout and Library, Opponent Twins, Repertoire Leaks (including recurring mistakes),
+Progress tracking, Auto-sync and higher daily allowances. The **Coach** plan adds a dashboard for up to 20 students.
+See [Plans](#plans).
 
 ---
 
@@ -381,8 +362,26 @@ The Library and Scout don't need your own chess account linked.
   detail, homework, notes and invite links. Students who join get Pro free and see the homework on their
   Train page. To turn it on for yourself: `python scripts/admin.py grant you@example.com --plan coach`.
 
-Third-party files: chess.js (BSD-2-Clause, `app/static/vendor/`) and the Chessnut piece set by Alexis
-Luengas (Apache-2.0, `app/static/pieces/chessnut/`, with its licence).
+## New in v0.5
+
+* **New interface** built around four jobs: **Diagnose, Train, Prepare, Coach** (bottom tab bar on phones).
+  "Your scoresheet, marked up by a coach": blue ink is you, red pen is the coach.
+* **Instant preview on the landing page:** type a Lichess username, get a Rating DNA from the last 15 games
+  in about half a minute, no account needed. Signing up from there links that account and starts the full import.
+* **Interactive board** everywhere: drag or click to move (or type the move), arrows for your move and the
+  engine's, and a **game viewer** with a scoresheet that jumps to your costliest mistake.
+* **Shareable Rating DNA card** (PNG for WhatsApp/Instagram/X), **Pro previews** that show real counts from
+  your games ("10 opening lines to check") instead of hidden tabs, and coach answers with the cited positions on boards.
+* **Installable app (PWA)**, dark mode, self-hosted fonts (no Google requests).
+* **Job queue:** imports, Prep Checks and previews run on a persistent, fair queue. Long imports go in chunks
+  of 20 newest-first, so the dashboard fills in after the first chunk; previews have their own fast lane.
+* **Email verification and password reset**, a **support form**, **account deletion**, a **weekly digest email**.
+* **Second model provider** (`LLM_FALLBACK_*`) tried before the offline coach.
+* **Sentry** error monitoring, **Plausible/PostHog** analytics, a public **status page** at `/status`.
+* **Daily backups** to S3-compatible storage (optionally encrypted) with a **weekly restore test**.
+* **Production deployment** in `deploy/`: Caddy (automatic HTTPS), Docker Compose with separate web,
+  worker and scheduler services, a VPS setup script and systemd units. See **DEPLOY.md**.
+* **Plans:** Free, Pro, **Event Pass** (Pro for 10 days: `scripts/admin.py grant EMAIL --days 10`) and a Coach waitlist.
 
 ## The AI coach: pick a model
 
@@ -443,18 +442,23 @@ question ─► navigate the OKF bundle ─► generate ────────
 
 ## Plans
 
-| | Free | Pro |
-|---|---|---|
-| Games per sync | 50 | 300 |
-| Linked accounts | 2 | 6 |
-| Coach questions / day | 15 | 200 |
-| Rating DNA, puzzles, plan | ✓ | ✓ |
-| Opponent Scout | – | ✓ (25/day) |
-| ChessBase / PGN upload, OKF bundle export | ✓ | ✓ |
-| Prep Check (ChessBase repertoire vs games) | – | ✓ |
-| Repertoire Leaks + recurring mistakes | – | ✓ |
-| Progress tracking | – | ✓ |
-| Auto-sync | – | ✓ |
+| | Free | Pro (and Event Pass) | Coach |
+|---|---|---|---|
+| Games per sync | 200 | 500 | 500 |
+| Linked accounts | 2 | 6 | 6 |
+| Coach questions / day | 15 | 200 | 200 |
+| Rating DNA, puzzles, plan | ✓ | ✓ | ✓ |
+| ChessBase / PGN upload, OKF bundle export | ✓ | ✓ | ✓ |
+| Predicted puzzles / day (your Twin's games) | 8 (60) | 40 (300) | 60 (500) |
+| "Think here" games scanned | 100 | 500 | 500 |
+| Scoresheet photos / day | 3 | 30 | 100 |
+| Report cards / day (written by the AI) | 10 (3) | 100 (30) | 200 (60) |
+| Opponent Scout downloads / day | – | 25 | 25 |
+| Opponent Library players | – | 150 | 500 |
+| Opponent Twin builds / day (games studied) | – | 10 (600) | 30 (2,000) |
+| Full-history games per library player | – | 3,000 | 10,000 |
+| Prep Check, Repertoire Leaks, Progress, Auto-sync | – | ✓ | ✓ |
+| Students dashboard | – | – | up to 20 |
 
 Limits live in `app/plans.py`. Payments aren't wired up: users press **Request Pro**, you see requests with `python scripts/admin.py requests` and grant with `... grant EMAIL`. See `DEPLOY.md` for adding Stripe or Razorpay.
 
@@ -554,3 +558,8 @@ ruff check .
 ```
 
 The demo data (`sample_data/demo_games.pgn`) is 40 synthetic games for `demo_player`. Use real games to judge the product.
+
+## Third-party files
+
+chess.js (BSD-2-Clause, `app/static/vendor/`), the Chessnut piece set by Alexis Luengas (Apache-2.0,
+`app/static/pieces/chessnut/`, with its licence) and Lichess's opening list and puzzle database (CC0).
