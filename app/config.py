@@ -94,7 +94,7 @@ class Settings:
     vision2_model: str | None = None  # a second photo reader (any OpenAI-compatible vision model); readings are merged by vote
     vision2_base_url: str | None = None
     vision2_api_key: str | None = None
-    app_version: str = "1.2.0"
+    app_version: str = "1.2.1"
 
 
 def _public_url() -> str:
