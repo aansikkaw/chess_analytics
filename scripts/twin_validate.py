@@ -106,7 +106,8 @@ def run(name: str, games: int) -> dict:
     f = tw["profile"]["faithfulness"]
     return {"persona": name, "games": games, "decisions": tw["decisions"], "play_s": round(t1 - t0), "build_s": round(time.time() - t1),
             "recovered": checks, "twin_top1": f["twin_top1"], "engine_top1": f["engine_top1"], "twin_top3": f["twin_top3"],
-            "engine_top3": f["engine_top3"], "style": [x["text"] for x in tw["profile"]["style"]]}
+            "engine_top3": f["engine_top3"], "style": [x["text"] for x in tw["profile"]["style"]],
+            "curve": tw["profile"].get("learning_curve", [])}
 
 
 if __name__ == "__main__":
@@ -123,3 +124,5 @@ if __name__ == "__main__":
         print(f"  move match on held-out games: Twin {r['twin_top1']}% (top-3 {r['twin_top3']}%) vs Stockfish {r['engine_top1']}% "
               f"(top-3 {r['engine_top3']}%)")
         print(f"  style the Twin reports: {', '.join(r['style']) or '-'}")
+        print("  learning curve (games used -> their move in the Twin's top 3): "
+              + ", ".join(f"{p['games']} -> {p['twin_top3']}%" for p in r["curve"]))

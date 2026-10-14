@@ -37,6 +37,8 @@ DEMO_HANDLE = "demo_player"
 SYNC_OVERLAP_S = 3600  # re-ask for the last hour on incremental syncs; duplicates are skipped by id
 KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
 MAX_RATE_RETRIES = 3
+LIBRARY_PAGE = 1000  # games per Lichess page in a full-history download
+LIBRARY_MONTHS_PER_TURN = 6  # Chess.com monthly archives per job turn
 PLATFORM_LABELS = {"lichess": "Lichess", "chesscom": "Chess.com", "pgn": "ChessBase / PGN", "demo": "Demo"}
 
 
@@ -153,7 +155,8 @@ class Importer:
 
     def handlers(self) -> dict[str, Callable]:
         return {"import": self.handle_import, "autosync": self.handle_import, "prep": self.handle_prep,
-                "preview": self.handle_preview, "twin": self.handle_twin}
+                "preview": self.handle_preview, "twin": self.handle_twin, "library_full": self.handle_library_full,
+                "predict": self.handle_predict, "think": self.handle_think, "review": self.handle_review}
 
     # ---- import ----------------------------------------------------------------------------
     def _fetch(self, account: dict, p: dict) -> list[GameRecord]:
@@ -261,20 +264,226 @@ class Importer:
 
     # ---- Opponent Twin: fit a practice bot to a library player's games ------------------------------
     def handle_twin(self, job: dict, ctx) -> dict:
+        """Study a batch of the player's games (each once, ever) in chunks, then fit the Twin on everything studied."""
+        import random as _random
+
         from . import twin as twin_mod
         from .library import Library
 
-        p = job["payload"]
+        p = dict(job["payload"])
         lib = Library(self.store)
-        if not lib.player(p["player_id"]):
+        pid, classes, depth = p["player_id"], p.get("time_classes"), self.settings.twin_depth
+        if not lib.player(pid):
             raise JobError("That player was removed from the library.")
-        ctx.progress(stage="Reading their games")
+        if "queue" not in p:
+            _, available = twin_mod.study_counts(self.store, pid, classes, depth)
+            if available < twin_mod.MIN_GAMES:
+                raise JobError(f"The Twin needs at least {twin_mod.MIN_GAMES} games; there are {available} for these time controls.")
+            p["queue"] = twin_mod.pick_unstudied(self.store, pid, classes, p.get("budget", self.settings.twin_games), depth)
+            p["total"], p["done"] = len(p["queue"]), 0
+        chunk, rest = p["queue"][:twin_mod.STUDY_CHUNK], p["queue"][twin_mod.STUDY_CHUNK:]
+        if chunk:
+            ctx.progress(stage="Studying their decisions with Stockfish", total=p["total"], done=p["done"])
+            twin_mod.study_games(self.store, lib, pid, chunk, ctx.resources["engines"].main, depth,
+                                 _random.Random(job["id"] + str(p["done"])),
+                                 on_game=lambda i: ctx.progress(done=p["done"] + i))
+            p["done"] += len(chunk)
+        if rest:
+            p["queue"] = rest
+            raise Requeue(payload=p, stage=f"Studied {p['done']} of {p['total']} games; continuing shortly")
         try:
-            t = twin_mod.build(self.store, lib, p["player_id"], p.get("time_classes"), ctx.resources["engines"].main,
-                               max_games=self.settings.twin_games, depth=self.settings.twin_depth, progress=ctx.progress)
+            t = twin_mod.fit_twin(self.store, lib, pid, classes, depth, progress=ctx.progress)
         except ValueError as exc:
             raise JobError(str(exc)) from exc
-        return {"player_id": p["player_id"], "tc_key": t["tc_key"], "games": t["games"], "decisions": t["decisions"]}
+        return {"player_id": pid, "tc_key": t["tc_key"], "games": t["games"], "decisions": t["decisions"], "studied_now": p["total"]}
+
+    # ---- Twin-predicted puzzles: teach your Twin, prepare bank puzzles at your level, pick your likely misses -----
+    def handle_predict(self, job: dict, ctx) -> dict:
+        import random as _random
+
+        from . import predict, puzzlebank
+
+        account = self.store.account(job["account_id"])
+        if not account:
+            raise JobError("This account was removed.")
+        key = player_key(account)
+        p = dict(job["payload"])
+        games = self.store.load_games(key)
+        if not games:
+            raise JobError("Analyse some of your games first.")
+        engine = ctx.resources["engines"].main
+        depth = self.settings.twin_depth
+        puzzlebank.ensure_bank(self.store)
+        # 1. Your Twin studies the next batch of your games (each once, ever), in chunks.
+        if p.get("study"):
+            if "queue" not in p:
+                p["queue"] = predict.pick_own_unstudied(games, predict.studied_ids(self.store, key, depth), p["study"])
+                p["total"], p["done"] = len(p["queue"]), 0
+            chunk, rest = p["queue"][:predict.STUDY_CHUNK], p["queue"][predict.STUDY_CHUNK:]
+            if chunk:
+                ctx.progress(stage="Your Twin is studying your games", total=p["total"], done=p["done"])
+                by_id = {g.game_id: g for g in games}
+                predict.study_own(self.store, key, by_id, chunk, engine, depth, _random.Random(job["id"] + str(p["done"])),
+                                  on_game=lambda i: ctx.progress(done=p["done"] + i))
+                p["done"] += len(chunk)
+            if rest:
+                p["queue"] = rest
+                raise Requeue(payload=p, stage=f"Studied {p['done']} of {p['total']} games; continuing shortly")
+            p["study"], p["fit"] = 0, True
+        if p.get("fit"):
+            ctx.progress(stage="Fitting your Twin")
+            try:
+                predict.fit_self(self.store, key, games, depth, min_games=self.settings.self_twin_min_games)
+            except ValueError as exc:
+                p["twin_note"] = str(exc)
+            p["fit"] = False
+        # 2. Enough bank puzzles around your level, annotated with Stockfish's candidates (shared with everyone).
+        dna = rating_dna(games)
+        lo, hi = predict.band(predict.skill_row(self.store, key, dna))
+        ready, total = puzzlebank.band_counts(self.store, lo, hi)
+        target = min(self.settings.predict_pool, total)
+        if ready < target:
+            ids = puzzlebank.pick_unannotated(self.store, lo, hi, min(predict.ANNOTATE_CHUNK, target - ready), seed=p.get("turn", 0))
+            if ids:
+                ctx.progress(stage="Preparing puzzles at your level", total=target, done=ready)
+                puzzlebank.annotate(self.store, engine, ids, self.settings.bank_depth, on_one=lambda i: ctx.progress(done=ready + i))
+                if ready + len(ids) < target:
+                    p["turn"] = p.get("turn", 0) + 1
+                    raise Requeue(payload=p, stage=f"Prepared {ready + len(ids)} of {target} puzzles at your level; continuing")
+        # 3. Score every prepared puzzle for you and add your likeliest misses.
+        ctx.progress(stage="Predicting which puzzles you'd miss")
+        entries = predict.choose(self.store, key, dna, int(p.get("n", 0)))
+        added = predict.add_to_deck(self.store, key, entries)
+        if added and job.get("user_id"):
+            self.store.bump_usage(job["user_id"], "predicted", added)
+        return {"predicted": added, "twin_note": p.get("twin_note"), "studied_now": p.get("total", 0)}
+
+    # ---- Game report card: both sides with Stockfish, then the coach's write-up ------------------------------------
+    def handle_review(self, job: dict, ctx) -> dict:
+        from . import review, review_ai
+        from .llm import resolve_backends
+        from .switches import is_on
+
+        account = self.store.account(job["account_id"])
+        if not account:
+            raise JobError("This account was removed.")
+        key = player_key(account)
+        p = job["payload"]
+        g = next((g for g in self.store.load_games(key) if g.game_id == p["game_id"]), None)
+        if g is None:
+            raise JobError("That game isn't analysed yet. Give it a moment and try again.")
+        have = review.load(self.store, key, g.game_id)
+        depth = self.settings.review_depth
+        if have and have["depth"] >= depth:
+            rep, ai = have["report"], have["ai"]
+        else:
+            engine = ctx.resources["engines"].main
+            ctx.progress(stage="Checking every move with Stockfish", done=0, total=len(g.moves_san) + 1)
+            rep = review.build_report(review.game_input(account["handle"], g), engine, depth,
+                                      progress=lambda d, t: ctx.progress(done=d, total=t))
+            ai = review_ai.builtin(rep) | {"source": "built-in", "model": None, "grounded": True, "removed": []}
+            review.save(self.store, key, g.game_id, rep, ai)
+        if p.get("ai"):
+            backends = resolve_backends(self.settings) if is_on(self.store, "ai_coach") else []
+            if backends:
+                ctx.progress(stage="Your coach is writing the review")
+                written, used = review_ai.write(rep, backends)
+                if used and job.get("user_id"):
+                    self.store.bump_usage(job["user_id"], "ai_tokens", used)
+                if written["source"] == "ai" and job.get("user_id"):
+                    self.store.bump_usage(job["user_id"], "ai_review")
+                review.save_ai(self.store, key, g.game_id, written)
+                ai = written
+        return {"game_id": g.game_id, "coach": (ai or {}).get("source")}
+
+    # ---- "Think here": time every move and find the critical moments --------------------------------------------
+    def handle_think(self, job: dict, ctx) -> dict:
+        from . import think
+
+        account = self.store.account(job["account_id"])
+        if not account:
+            raise JobError("This account was removed.")
+        key = player_key(account)
+        p = dict(job["payload"])
+        games = self.store.load_games(key)
+        if "queue" not in p:
+            p["queue"] = think.pick_unscanned(games, think.scanned_ids(self.store, key), int(p.get("budget", 0)))
+            p["total"], p["done"] = len(p["queue"]), 0
+        by_id = {g.game_id: g for g in games}
+        chunk, rest = p["queue"][:think.SCAN_CHUNK], p["queue"][think.SCAN_CHUNK:]
+        if chunk:
+            engine = ctx.resources["engines"].main
+            ctx.progress(stage="Timing your moves and finding the critical moments", total=p["total"], done=p["done"])
+            for gid in chunk:
+                g = by_id.get(gid)
+                think.save_scan(self.store, key, gid, think.scan_game(g, engine, self.settings.think_depth) if g else [])
+                p["done"] += 1
+                ctx.progress(done=p["done"])
+        if rest:
+            p["queue"] = rest
+            raise Requeue(payload=p, stage=f"Scanned {p['done']} of {p['total']} games; continuing shortly")
+        return {"scanned": p["total"]}
+
+    # ---- Opponent Library: download a player's whole history, page by page -----------------------------
+    def handle_library_full(self, job: dict, ctx) -> dict:
+        from .library import Library
+        from .sources import chesscom_archives, chesscom_month, lichess_history_page
+
+        p = dict(job["payload"])
+        lib = Library(self.store)
+        player = lib.player(p["player_id"])
+        if not player:
+            raise JobError("That player was removed from the library.")
+        handle, cap = player["handle"], p["cap"]
+        p.setdefault("seen", 0)
+        p.setdefault("added", 0)
+        p.setdefault("started", time.time())
+        done = False
+        try:
+            if player["platform"] == "lichess":
+                want = min(LIBRARY_PAGE, cap - p["seen"])
+                pgn, n, oldest = lichess_history_page(handle, want, p.get("until"))
+                recs = self._parse_quietly(pgn, handle) if n else []
+                p["added"] += lib.add_games(player["id"], recs)
+                p["seen"] += n
+                if recs:
+                    p["oldest"] = min(r.played_at for r in recs)
+                p["until"] = oldest - 1 if oldest else None
+                done = n < want or not oldest or p["seen"] >= cap
+            else:
+                if "archives" not in p:
+                    p["archives"] = chesscom_archives(handle)
+                    p["months"] = len(p["archives"])
+                for _ in range(LIBRARY_MONTHS_PER_TURN):
+                    if not p["archives"] or p["seen"] >= cap:
+                        break
+                    url = p["archives"].pop(0)
+                    recs = self._parse_quietly(chesscom_month(url), handle)[: cap - p["seen"]]
+                    p["added"] += lib.add_games(player["id"], recs)
+                    p["seen"] += len(recs)
+                    p["oldest"] = "/".join(url.rstrip("/").split("/")[-2:])
+                done = not p["archives"] or p["seen"] >= cap
+        except RateLimited as exc:
+            if job["attempts"] >= 3 * MAX_RATE_RETRIES:
+                raise JobError(str(exc)) from exc
+            raise Requeue(payload=p, delay=65, stage=f"{exc} Continuing automatically in a minute.") from exc
+        except GameImportError as exc:
+            if not p["seen"]:
+                raise JobError(str(exc)) from exc
+            done = True  # keep what we have
+        back = f" (back to {p['oldest']})" if p.get("oldest") else ""
+        ctx.progress(stage=f"Downloaded {p['seen']:,} games{back}", done=min(p["seen"], cap), total=cap)
+        if not done:
+            raise Requeue(payload=p, stage=f"Downloaded {p['seen']:,} games{back}; continuing")
+        lib.finish_full(player["id"], p["started"])
+        return {"player_id": player["id"], "seen": p["seen"], "added": p["added"], "games": lib.player(player["id"])["games"]}
+
+    @staticmethod
+    def _parse_quietly(pgn: str, handle: str) -> list[GameRecord]:
+        try:
+            return parse_pgn(pgn, handle) if pgn.strip() else []
+        except GameImportError:
+            return []
 
     # ---- instant preview (no account needed) ---------------------------------------------------
     def handle_preview(self, job: dict, ctx) -> dict:

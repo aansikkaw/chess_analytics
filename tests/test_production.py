@@ -217,7 +217,8 @@ def test_download_my_data(m):
         assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
         z = zipfile.ZipFile(io.BytesIO(r.content))
         names = z.namelist()
-        assert {"README.txt", "account.json", "activity.json"} <= set(names)
+        assert {"README.txt", "account.json", "activity.json", "training.json"} <= set(names)
+        assert set(json.loads(z.read("training.json"))) == {"puzzle_skill", "twin_of_you", "think_moments"}
         assert any(n.startswith("games/") for n in names) and any(n.startswith("puzzles/") for n in names)
         account = json.loads(z.read("account.json"))
         assert account["user"]["email"] == "export@test.com"

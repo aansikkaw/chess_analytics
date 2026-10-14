@@ -52,8 +52,9 @@ class Settings:
     preview_games: int = 15
     preview_depth: int = 8
     preview_time: float = 0.03
-    twin_games: int = 40  # games studied when building an Opponent Twin
+    twin_games: int = 150  # games an Opponent Twin studies per build ("Keep learning" studies the next batch)
     twin_depth: int = 9  # engine depth for the Twin's candidate moves (when building and when playing)
+    library_full_max: int = 10_000  # server-wide cap on games kept per library player (full-history downloads)
     previews_per_hour: int = 6  # per IP address
     signups_per_hour: int = 10  # per IP address
     public_url: str = "http://localhost:8000"  # used in email links; detected automatically in Codespaces
@@ -79,7 +80,21 @@ class Settings:
     plausible_src: str = "https://plausible.io/js/script.tagged-events.js"
     posthog_key: str | None = None
     posthog_host: str = "https://eu.i.posthog.com"
-    app_version: str = "0.9.0"
+    # --- v1.1: predicted puzzles, the "Think here" trainer, the scoresheet scanner ---
+    bank_depth: int = 10  # engine depth when annotating bank puzzles for Twin predictions (once per puzzle, shared)
+    think_depth: int = 10  # engine depth for finding critical moments in your games
+    predict_pool: int = 300  # annotated bank puzzles to keep ready around each player's level
+    self_twin_min_games: int = 10  # games your own Twin needs before it's used for predictions
+    vision_provider: str = "auto"  # auto | anthropic | openai | off: which model reads scoresheet photos
+    vision_model: str | None = None
+    vision_base_url: str | None = None
+    vision_api_key: str | None = None
+    scans_per_hour: int = 20  # photo scans per user per hour (on top of the plan's daily allowance)
+    review_depth: int = 14  # engine depth for full game reviews (both sides, top two moves per position)
+    vision2_model: str | None = None  # a second photo reader (any OpenAI-compatible vision model); readings are merged by vote
+    vision2_base_url: str | None = None
+    vision2_api_key: str | None = None
+    app_version: str = "1.2.0"
 
 
 def _public_url() -> str:
@@ -123,7 +138,8 @@ def load_settings() -> Settings:
         preview_games=max(3, min(40, int(os.getenv("PREVIEW_GAMES", "15")))),
         preview_depth=int(os.getenv("PREVIEW_DEPTH", "8")),
         preview_time=float(os.getenv("PREVIEW_TIME", "0.03")),
-        twin_games=max(10, int(os.getenv("TWIN_GAMES", "40"))),
+        twin_games=max(10, int(os.getenv("TWIN_GAMES", "150"))),
+        library_full_max=max(500, int(os.getenv("LIBRARY_FULL_MAX", "10000"))),
         twin_depth=max(3, int(os.getenv("TWIN_DEPTH", "9"))),
         previews_per_hour=int(os.getenv("PREVIEWS_PER_HOUR", "6")),
         signups_per_hour=int(os.getenv("SIGNUPS_PER_HOUR", "10")),
@@ -150,4 +166,17 @@ def load_settings() -> Settings:
         plausible_src=os.getenv("PLAUSIBLE_SRC", "https://plausible.io/js/script.tagged-events.js"),
         posthog_key=os.getenv("POSTHOG_KEY") or None,
         posthog_host=os.getenv("POSTHOG_HOST", "https://eu.i.posthog.com").rstrip("/"),
+        bank_depth=max(3, int(os.getenv("BANK_DEPTH", "10"))),
+        think_depth=max(3, int(os.getenv("THINK_DEPTH", "10"))),
+        predict_pool=max(10, int(os.getenv("PREDICT_POOL", "300"))),
+        self_twin_min_games=max(1, int(os.getenv("SELF_TWIN_MIN_GAMES", "10"))),
+        vision_provider=os.getenv("VISION_PROVIDER", "auto").strip().lower(),
+        vision_model=(os.getenv("VISION_MODEL") or "").strip() or None,
+        vision_base_url=(os.getenv("VISION_BASE_URL") or "").rstrip("/") or None,
+        vision_api_key=os.getenv("VISION_API_KEY") or None,
+        scans_per_hour=max(1, int(os.getenv("SCANS_PER_HOUR", "20"))),
+        review_depth=max(4, int(os.getenv("REVIEW_DEPTH", "14"))),
+        vision2_model=(os.getenv("VISION2_MODEL") or "").strip() or None,
+        vision2_base_url=(os.getenv("VISION2_BASE_URL") or "").rstrip("/") or None,
+        vision2_api_key=os.getenv("VISION2_API_KEY") or None,
     )

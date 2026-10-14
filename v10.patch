@@ -1,0 +1,1354 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-12 11:30:53.202395078 +0000
++++ b/README.md	2026-10-12 11:29:46.000000000 +0000
+@@ -77,6 +77,32 @@
+ 
+ To give yourself Pro while testing, add a Codespaces secret `ADMIN_EMAILS` with your email *before* you sign up. Or grant it afterwards with `python scripts/admin.py grant you@example.com`.
+ 
++## New in v1.0: Deep Twin (a player's whole career, not just 200 games)
++
++* **Download full history.** On a library player's page, one click downloads their entire rated history in
++  the background: Lichess page by page, Chess.com month by month. It resumes after interruptions, waits
++  politely when the sites rate-limit, and Update keeps it current afterwards. Pro keeps up to 3,000 games
++  per player and Coach up to 10,000 (`library_full_games` in `app/plans.py`, server cap `LIBRARY_FULL_MAX`).
++* **Their book uses every game.** The Explorer and the Twin's opening book read all of a player's saved
++  games, weighting recent ones. This needs no engine, so it stays instant at 10,000 games.
++* **The model keeps learning.** Running Stockfish over every game is the expensive part (about 1 second per
++  game). So each game is studied **once, ever**, and the result is saved compressed (about 2 KB per game).
++  - A build studies the next batch (150 games by default). Two thirds are the newest unstudied games and one
++    third is spread across their history.
++  - **Keep learning** adds another batch, up to the plan's limit: Pro 600 studied games, Coach 2,000.
++  - Refitting on everything studied takes seconds.
++* **Recent games count more.** In the model a game two years older counts half as much, because players
++  change. The model fits on the most recent 24,000 decisions (about 800 games).
++* **Learning curve.** Every build refits on 10, 25, 50, 100… of the studied games and tests each fit on the
++  same held-out games. The chart on the Twin's page shows how faithfulness grows with data, and where it
++  levels off for that player.
++* **What more data buys (measured).** For the "attacker" persona, studying 150 games instead of 30
++  recovered its king-hunting weight at 1.93 instead of 1.08 (the true value is 2.5), with check at 1.47
++  (true 1.5). So its habits came out much more accurately. Its move match on held-out games levelled off
++  early: 64% top-3 against Stockfish's 60%, already reached after about 25 games. In other words, more
++  games sharpen *how sure* the Twin is about each habit and fill in far more of their opening book. That is
++  where a real player's whole career pays off most. More games don't push the single-move match up forever.
++
+ ## New in v0.9: Opponent Twin (practise against a bot that plays like them)
+ 
+ Prepare → Opponent Library → pick a player → **Play their Twin**.
+@@ -125,11 +151,12 @@
+ 
+ **Limits and safety.**
+ - Building needs 10+ games, and you can build from chosen time controls only, since openings differ by speed.
+-- Pro gets 10 builds a day and Coach 30. A Twin built in the last day (with no new games since) is reused,
+-  and a Twin of a public player is shared by everyone who saved that player.
++- Pro gets 10 builds a day and Coach 30. Once every game is studied (or the plan's study limit is reached)
++  a build is "up to date" and costs nothing. A Twin of a public player, and its studied games, are shared by
++  everyone who saved that player.
+ - Moves and reviews are rate-limited, and the `twin` kill switch pauses everything.
+ - It's a practice bot inside the app, built from public games. It never runs during live games.
+-- Settings: `TWIN_GAMES` (40), `TWIN_DEPTH` (9).
++- Settings: `TWIN_GAMES` (150 per build since v1.0), `TWIN_DEPTH` (9).
+ 
+ ## New in v0.8: Opponent Library (your own Mega Database of opponents)
+ 
+@@ -297,6 +324,8 @@
+ | `REQUIRE_EMAIL_VERIFICATION` | `0` | `1` blocks syncing and the coach until the email is confirmed |
+ | `REQUIRE_TERMS` | `1` | New accounts must confirm they're 18+ and accept the Terms and Privacy Policy |
+ | `LEGAL_ENTITY` / `LEGAL_CITY` / `LEGAL_UPDATED` / `LEGAL_REVIEWED` | unset | Who runs the service, courts, date and draft notice on `/privacy`, `/terms`, `/refunds` |
++| `TWIN_GAMES` / `TWIN_DEPTH` | `150` / `9` | Games an Opponent Twin studies per build, and the engine depth it uses |
++| `LIBRARY_FULL_MAX` | `10000` | Server cap on games kept per library player (full-history downloads) |
+ | `LOG_LEVEL` | `INFO` | App log level; the JSON access log is the `plateau.access` logger |
+ | `LLM_FALLBACK_BASE_URL` / `LLM_FALLBACK_API_KEY` / `LLM_FALLBACK_MODEL` | unset | Second OpenAI-compatible provider |
+ | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` / `SENTRY_TRACES_SAMPLE_RATE` | unset / `production` / `0` | Error monitoring |
+@@ -343,7 +372,7 @@
+ 
+ ```bash
+ pip install -r requirements-dev.txt
+-pytest        # 258 tests; engine tests skip if Stockfish is missing
++pytest        # 265 tests; engine tests skip if Stockfish is missing
+ ruff check .
+ ```
+ 
+diff -ruN a/RUNBOOK.md b/RUNBOOK.md
+--- a/RUNBOOK.md	2026-10-12 11:30:53.203028183 +0000
++++ b/RUNBOOK.md	2026-10-12 11:20:38.000000000 +0000
+@@ -100,5 +100,8 @@
+ * Groq's free tier allows about one coach question a minute across all users; the paid tier removes that.
+   Each user also has a daily AI token budget (`ai_tokens_per_day` in `app/plans.py`), so one heavy user
+   can't run up the bill.
++* Opponent Library and Twins: about 6.5 KB per saved game (with the position index) and 2 KB per studied
++  game. 100 players with full histories of 3,000 games is about 2 GB. A Twin build studies about 1 game a
++  second per worker. Pause them with `pb switch twin off` if workers are needed for imports.
+ * Load test before a launch: `deploy/loadtest/locustfile.py` (instructions inside). Watch the status page's
+   queue wait, p95 latency in the access log, and the error rate.
+diff -ruN a/app/config.py b/app/config.py
+--- a/app/config.py	2026-10-12 11:30:53.297847462 +0000
++++ b/app/config.py	2026-10-12 11:11:47.000000000 +0000
+@@ -52,8 +52,9 @@
+     preview_games: int = 15
+     preview_depth: int = 8
+     preview_time: float = 0.03
+-    twin_games: int = 40  # games studied when building an Opponent Twin
++    twin_games: int = 150  # games an Opponent Twin studies per build ("Keep learning" studies the next batch)
+     twin_depth: int = 9  # engine depth for the Twin's candidate moves (when building and when playing)
++    library_full_max: int = 10_000  # server-wide cap on games kept per library player (full-history downloads)
+     previews_per_hour: int = 6  # per IP address
+     signups_per_hour: int = 10  # per IP address
+     public_url: str = "http://localhost:8000"  # used in email links; detected automatically in Codespaces
+@@ -79,7 +80,7 @@
+     plausible_src: str = "https://plausible.io/js/script.tagged-events.js"
+     posthog_key: str | None = None
+     posthog_host: str = "https://eu.i.posthog.com"
+-    app_version: str = "0.9.0"
++    app_version: str = "1.0.0"
+ 
+ 
+ def _public_url() -> str:
+@@ -123,7 +124,8 @@
+         preview_games=max(3, min(40, int(os.getenv("PREVIEW_GAMES", "15")))),
+         preview_depth=int(os.getenv("PREVIEW_DEPTH", "8")),
+         preview_time=float(os.getenv("PREVIEW_TIME", "0.03")),
+-        twin_games=max(10, int(os.getenv("TWIN_GAMES", "40"))),
++        twin_games=max(10, int(os.getenv("TWIN_GAMES", "150"))),
++        library_full_max=max(500, int(os.getenv("LIBRARY_FULL_MAX", "10000"))),
+         twin_depth=max(3, int(os.getenv("TWIN_DEPTH", "9"))),
+         previews_per_hour=int(os.getenv("PREVIEWS_PER_HOUR", "6")),
+         signups_per_hour=int(os.getenv("SIGNUPS_PER_HOUR", "10")),
+diff -ruN a/app/jobs.py b/app/jobs.py
+--- a/app/jobs.py	2026-10-12 11:30:53.297501285 +0000
++++ b/app/jobs.py	2026-10-12 11:12:26.000000000 +0000
+@@ -55,7 +55,7 @@
+ """
+ 
+ # Lower runs first.
+-PRIORITY = {"preview": 1, "prep": 3, "import": 5, "autosync": 8}
++PRIORITY = {"preview": 1, "prep": 3, "import": 5, "twin": 6, "library_full": 7, "autosync": 8}
+ STALE_AFTER_S = 300  # a running job with no heartbeat for this long is assumed dead and re-queued
+ KEEP_FINISHED_DAYS = 14
+ ACTIVE = ("queued", "running")
+diff -ruN a/app/library.py b/app/library.py
+--- a/app/library.py	2026-10-12 11:30:53.312200160 +0000
++++ b/app/library.py	2026-10-12 11:11:53.000000000 +0000
+@@ -130,6 +130,13 @@
+                 c.execute("UPDATE lib_players SET games = ?, fetched_at = ? WHERE id = ?", (n, time.time(), player_id))
+         return added
+ 
++    def finish_full(self, player_id: int, started: float) -> None:
++        """A full-history download finished: later updates fetch only games since it started."""
++        with self._conn() as c:
++            n = c.execute("SELECT COUNT(*) FROM lib_games WHERE player_id = ?", (player_id,)).fetchone()[0]
++            c.execute("UPDATE lib_players SET games = ?, full_at = ?, fetched_at = ?, requested = MAX(COALESCE(requested, 0), ?) "
++                      "WHERE id = ?", (n, time.time(), started, n, player_id))
++
+     def records(self, player_id: int, limit: int | None = None) -> list[GameRecord]:
+         sql = "SELECT data FROM lib_games WHERE player_id = ? ORDER BY played_at DESC, id DESC"
+         args: list = [player_id]
+@@ -156,7 +163,7 @@
+     def entries(self, user_id: int) -> list[dict]:
+         with self._conn() as c:
+             rows = [dict(r) for r in c.execute(
+-                "SELECT p.id, p.platform, p.handle, p.owner_id, p.games, p.fetched_at, l.notes, l.tags, l.added_at, l.opened_at, "
++                "SELECT p.id, p.platform, p.handle, p.owner_id, p.games, p.fetched_at, p.full_at, l.notes, l.tags, l.added_at, l.opened_at, "
+                 "(SELECT MAX(played_at) FROM lib_games g WHERE g.player_id = p.id) AS last_game, "
+                 "(SELECT ROUND(100.0 * AVG(score)) FROM lib_games g WHERE g.player_id = p.id) AS score_pct "
+                 "FROM library l JOIN lib_players p ON p.id = l.player_id WHERE l.user_id = ? "
+@@ -191,6 +198,7 @@
+         c.execute("DELETE FROM lib_positions WHERE game_ref IN (SELECT id FROM lib_games WHERE player_id = ?)", (player_id,))
+         c.execute("DELETE FROM lib_games WHERE player_id = ?", (player_id,))
+         c.execute("DELETE FROM twins WHERE player_id = ?", (player_id,))
++        c.execute("DELETE FROM twin_games WHERE player_id = ?", (player_id,))
+         c.execute("DELETE FROM lib_players WHERE id = ?", (player_id,))
+ 
+     def delete_user(self, user_id: int) -> None:
+diff -ruN a/app/main.py b/app/main.py
+--- a/app/main.py	2026-10-12 11:30:53.296475137 +0000
++++ b/app/main.py	2026-10-12 11:12:26.000000000 +0000
+@@ -1123,6 +1123,39 @@
+     return {"player": library.entry(user["id"], player_id), "downloaded": downloaded, "new_games": new, "message": msg}
+ 
+ 
++@app.get("/api/library/{player_id}/full")
++def library_full_status(player_id: int, user: dict = Depends(library_user)) -> dict:
++    p = _owned_library_player(user, player_id)
++    job = queue.find_recent("library_full", f"full:{player_id}", 24 * 3600)
++    active = job["id"] if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"] else None
++    return {"job_id": active, "full_at": p.get("full_at"), "games": p["games"], "cap": _full_cap(user)}
++
++
++def _full_cap(user: dict) -> int:
++    return min(plan_of(user).get("library_full_games", 0), settings.library_full_max)
++
++
++@app.post("/api/library/{player_id}/full")
++def library_full(player_id: int, user: dict = Depends(library_user)) -> dict:
++    """Download the player's whole rated history (up to the plan's limit) in the background."""
++    p = _owned_library_player(user, player_id)
++    if p["platform"] == "pgn":
++        raise HTTPException(400, "This player's games come from a PGN upload. Upload their full database instead.")
++    platform_allowed(p["platform"])
++    imports_allowed()
++    job = queue.find_recent("library_full", f"full:{player_id}", 24 * 3600)
++    if job and job["state"] in ("queued", "running"):
++        if job["user_id"] == user["id"]:
++            return {"job_id": job["id"], "message": "Already downloading."}
++        raise HTTPException(409, "Someone else is downloading this player's history right now. Try again when it's done.")
++    if p.get("full_at") and time.time() - p["full_at"] < 7 * 86_400:
++        return {"job_id": None, "message": "Their full history was downloaded this week. Update fetches anything newer."}
++    spend(user, "scout", plan_of(user)["scouts_per_day"])
++    job_id = jobs.submit("library_full", {"player_id": player_id, "cap": _full_cap(user), "key": f"full:{player_id}"}, user["id"])
++    audit(user, "library_full_history", f"library:{player_id}")
++    return {"job_id": job_id, "message": f"Downloading {p['handle']}'s full history in the background. Big histories take a few minutes."}
++
++
+ @app.get("/api/library/{player_id}/report")
+ def library_report(player_id: int, games: int = 200, account_id: int | None = None, user: dict = Depends(library_user)) -> dict:
+     _owned_library_player(user, player_id)
+@@ -1258,14 +1291,22 @@
+     if not t:
+         return None
+     with store._conn() as c:
+-        sql = "SELECT COUNT(*), MAX(played_at) FROM lib_games WHERE player_id = ?"
++        sql = "SELECT MAX(played_at) FROM lib_games WHERE player_id = ?"
+         args: list = [player["id"]]
+         if classes:
+             sql += f" AND time_class IN ({','.join('?' * len(classes))})"
+             args += classes
+-        count, newest = c.execute(sql, args).fetchone()
+-    stale = bool(newest and newest > t["newest_game"]) and (count or 0) - t["games"] >= 0
+-    return {k: t[k] for k in ("tc_key", "built_at", "games", "decisions", "newest_game", "profile")} | {"stale": stale, "games_available": count}
++        newest = c.execute(sql, args).fetchone()[0]
++    stale = bool(newest and newest > t["newest_game"])
++    return {k: t[k] for k in ("tc_key", "built_at", "games", "decisions", "newest_game", "profile")} | {"stale": stale}
++
++
++def _study_room(user: dict, player_id: int, classes: list[str]) -> dict:
++    """How much more this Twin can learn: games studied, available, and the plan's limit."""
++    studied, available = twin_mod.study_counts(store, player_id, classes, settings.twin_depth)
++    cap = plan_of(user).get("twin_study_max", 0)
++    return {"studied": studied, "available": available, "study_max": cap,
++            "next_batch": max(0, min(settings.twin_games, cap - studied, available - studied))}
+ 
+ 
+ @app.get("/api/twin/{player_id}")
+@@ -1273,37 +1314,39 @@
+     player = _owned_library_player(user, player_id)
+     classes = _twin_classes(tc.split(",") if tc else None)
+     key = twin_mod.tc_key(classes)
+-    job = queue.find_recent("twin", f"{player_id}:{key}", 3600)
++    job = queue.find_recent("twin", f"{player_id}:{key}", 6 * 3600)
+     active = job["id"] if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"] else None
+-    with store._conn() as c:
+-        sql = "SELECT COUNT(*) FROM lib_games WHERE player_id = ?"
+-        args: list = [player_id]
+-        if classes:
+-            sql += f" AND time_class IN ({','.join('?' * len(classes))})"
+-            args += classes
+-        games = c.execute(sql, args).fetchone()[0]
++    room = _study_room(user, player_id, classes)
+     left = max(0, plan_of(user).get("twin_builds_per_day", 0) - store.usage_today(user["id"], "twin_build"))
+     return {"player": library.entry(user["id"], player_id), "tc_key": key, "twin": _twin_view(twin_mod.load(store, player_id, key), player, classes),
+-            "job_id": active, "games": games, "min_games": twin_mod.MIN_GAMES, "builds_left": left,
+-            "engine": state["engine"] is not None}
++            "job_id": active, "games": room["available"], "min_games": twin_mod.MIN_GAMES, "builds_left": left,
++            "engine": state["engine"] is not None, "study": room}
+ 
+ 
+ @app.post("/api/twin/{player_id}/build")
+ def twin_build(player_id: int, body: TwinBuild, user: dict = Depends(library_user)) -> dict:
++    """Build the Twin, or (when it exists) let it keep learning: study the next batch of games and refit."""
+     _twin_allowed()
+     player = _owned_library_player(user, player_id)
+     classes = _twin_classes(body.time_classes)
+     key = twin_mod.tc_key(classes)
+-    existing = _twin_view(twin_mod.load(store, player_id, key), player, classes)
+-    if existing and not existing["stale"] and time.time() - existing["built_at"] < 86_400:
+-        return {"job_id": None, "message": "This Twin is already up to date.", "twin": existing}
+-    job = queue.find_recent("twin", f"{player_id}:{key}", 3600)
++    job = queue.find_recent("twin", f"{player_id}:{key}", 6 * 3600)
+     if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"]:
+-        return {"job_id": job["id"], "message": "Already building."}
++        return {"job_id": job["id"], "message": "Already learning."}
++    existing = _twin_view(twin_mod.load(store, player_id, key), player, classes)
++    room = _study_room(user, player_id, classes)
++    if existing and not existing["stale"] and room["next_batch"] == 0:
++        why = "every one of their games is already studied" if room["studied"] >= room["available"] else \
++            f"it has studied {room['studied']} games, your plan's limit"
++        return {"job_id": None, "message": f"This Twin is up to date: {why}.", "twin": existing}
+     spend(user, "twin_build", plan_of(user).get("twin_builds_per_day", 0))
+-    job_id = jobs.submit("twin", {"player_id": player_id, "time_classes": classes, "key": f"{player_id}:{key}"}, user["id"])
+-    audit(user, "twin_built", f"library:{player_id}", time_classes=key)
+-    return {"job_id": job_id, "message": f"Building {player['handle']}'s Twin. It studies their games with the engine: usually 1-2 minutes."}
++    job_id = jobs.submit("twin", {"player_id": player_id, "time_classes": classes, "key": f"{player_id}:{key}",
++                                  "budget": room["next_batch"]}, user["id"])
++    audit(user, "twin_built", f"library:{player_id}", time_classes=key, batch=room["next_batch"])
++    minutes = max(1, round(room["next_batch"] * 1.1 / 60))
++    verb = "Teaching" if existing else "Building"
++    return {"job_id": job_id, "message": f"{verb} {player['handle']}'s Twin: studying {room['next_batch']} more games "
++                                         f"(about {minutes} minute{'s' if minutes != 1 else ''})."}
+ 
+ 
+ def _twin_or_404(player_id: int, classes: list[str]) -> dict:
+diff -ruN a/app/plans.py b/app/plans.py
+--- a/app/plans.py	2026-10-12 11:30:53.313157223 +0000
++++ b/app/plans.py	2026-10-12 11:11:47.000000000 +0000
+@@ -36,7 +36,9 @@
+         "ai_tokens_per_day": 600_000,
+         "scouts_per_day": 25,  # downloads: opening a player already in your library is free
+         "library_players": 150,  # players saved in the Opponent Library
+-        "twin_builds_per_day": 10,  # Opponent Twin builds (each studies ~40 games with the engine)
++        "twin_builds_per_day": 10,  # Opponent Twin builds ("Keep learning" counts as one)
++        "twin_study_max": 600,  # games a Twin can study in total, across builds
++        "library_full_games": 3000,  # games kept per library player by "Download full history"
+         "features": {"dna", "puzzles", "plan", "coach", "scout", "repertoire", "progress", "autosync", "prep"},
+         "blurb": "Everything in Free, plus Prep Check for your ChessBase repertoire, Opponent Scout, Repertoire Leaks, "
+                  "Progress tracking and Auto-sync.",
+@@ -51,6 +53,8 @@
+     "ai_tokens_per_day": 1_200_000,
+     "library_players": 500,
+     "twin_builds_per_day": 30,
++    "twin_study_max": 2000,
++    "library_full_games": 10_000,
+     "features": PLANS["pro"]["features"] | {"students"},
+     "blurb": "Everything in Pro, plus a dashboard for up to 20 students: every student's Rating DNA, weak spots and homework.",
+ }
+diff -ruN a/app/sources.py b/app/sources.py
+--- a/app/sources.py	2026-10-12 11:30:53.312384569 +0000
++++ b/app/sources.py	2026-10-12 11:08:56.000000000 +0000
+@@ -17,10 +17,12 @@
+ from __future__ import annotations
+ 
+ import os
++import re
+ import threading
+ import time
+ from collections.abc import Iterable
+ from contextlib import contextmanager, nullcontext, suppress
++from datetime import UTC, datetime
+ from pathlib import Path
+ 
+ try:
+@@ -272,6 +274,84 @@
+     return "\n\n".join(pgns)
+ 
+ 
++# ---- full history (the Opponent Library's "Download full history") ----------------------------------
++_UTC_DATE = re.compile(r'\[UTCDate "(\d{4})\.(\d{2})\.(\d{2})"\]')
++_UTC_TIME = re.compile(r'\[UTCTime "(\d{2}):(\d{2}):(\d{2})"\]')
++
++
++def _oldest_ms(pgn: str) -> int | None:
++    """The earliest UTCDate + UTCTime in a Lichess PGN export, in milliseconds."""
++    dates, times = _UTC_DATE.findall(pgn), _UTC_TIME.findall(pgn)
++    stamps = []
++    for d, t in zip(dates, times, strict=False):
++        try:
++            stamps.append(int(datetime(*map(int, d), *map(int, t), tzinfo=UTC).timestamp() * 1000))
++        except ValueError:
++            continue
++    return min(stamps) if stamps else None
++
++
++def lichess_history_page(username: str, max_games: int, until_ms: int | None = None,
++                         http: httpx.Client | None = None) -> tuple[str, int, int | None]:
++    """One page of a player's whole rated Lichess history, newest first.
++    Returns (pgn, games in the page, the oldest game's time in ms). Ask again with until_ms = oldest - 1."""
++    username = validate_username(username)
++    params = {"max": max_games, "rated": "true", "perfType": ",".join(TIME_CLASSES), "clocks": "true", "opening": "true",
++              "evals": "false"}
++    if until_ms:
++        params["until"] = until_ms
++    c = _client(http)
++    try:
++        with _serial("lichess"):
++            r = _get(c, f"{LICHESS}/api/games/user/{username}", params=params, headers={"Accept": "application/x-chess-pgn"})
++            if r.status_code == 404:
++                raise GameImportError(f"No Lichess account called '{username}'.")
++            _raise_for(r, "Lichess")
++            pgn = r.text
++    except httpx.HTTPError as exc:
++        raise network_error("Lichess", exc) from exc
++    finally:
++        if http is None:
++            c.close()
++    return pgn, pgn.count("[Event "), _oldest_ms(pgn)
++
++
++def chesscom_archives(username: str, http: httpx.Client | None = None) -> list[str]:
++    """Every monthly archive URL for a Chess.com player, newest first."""
++    username = validate_username(username).lower()
++    c = _client(http)
++    try:
++        with _serial("chesscom"):
++            r = _get(c, f"{CHESSCOM}/player/{username}/games/archives")
++            if r.status_code in (404, 410):
++                raise GameImportError(f"No Chess.com account called '{username}'.")
++            _raise_for(r, "Chess.com")
++            return list(reversed(r.json().get("archives", [])))
++    except httpx.HTTPError as exc:
++        raise network_error("Chess.com", exc) from exc
++    finally:
++        if http is None:
++            c.close()
++
++
++def chesscom_month(url: str, http: httpx.Client | None = None) -> str:
++    """One monthly archive: the PGNs of its rated standard games (every time control), newest first."""
++    if not url.startswith(CHESSCOM + "/player/"):
++        raise GameImportError("That isn't a Chess.com archive address.")
++    c = _client(http)
++    try:
++        with _serial("chesscom"):
++            r = _get(c, url)
++            _raise_for(r, "Chess.com")
++            games = sorted(r.json().get("games", []), key=lambda g: g.get("end_time", 0), reverse=True)
++    except httpx.HTTPError as exc:
++        raise network_error("Chess.com", exc) from exc
++    finally:
++        if http is None:
++            c.close()
++    return "\n\n".join(g["pgn"] for g in games if g.get("rules") == "chess" and g.get("rated") and g.get("pgn"))
++
++
+ def fetch_games(platform: str, username: str, max_games: int, time_classes=None, since_ms: int | None = None,
+                 http: httpx.Client | None = None) -> list[GameRecord]:
+     """Download and parse. Returns [] (not an error) when there's simply nothing new."""
+diff -ruN a/app/static/app.css b/app/static/app.css
+--- a/app/static/app.css	2026-10-12 11:30:53.299749300 +0000
++++ b/app/static/app.css	2026-10-12 11:20:22.000000000 +0000
+@@ -719,3 +719,13 @@
+ .chip.static:hover { border-color: var(--rule-2); color: var(--ink); }
+ @media (max-width: 1100px) { .twin-profile { grid-template-columns: minmax(0, 1fr); } }
+ @media (max-width: 900px) { .twin-game { grid-template-columns: minmax(0, 1fr); } .twin-panel { position: static; } }
++.twin-study { display: grid; gap: 6px; padding-top: 4px; }
++.twin-curve-wrap { margin: 0; }
++.twin-curve { width: 100%; max-width: 320px; height: auto; display: block; overflow: visible; }
++.twin-curve .axis { stroke: var(--rule-2); stroke-width: 1; }
++.twin-curve .curve { fill: none; stroke: var(--blue); stroke-width: 2; }
++.twin-curve .dot { fill: var(--sheet); stroke: var(--blue); stroke-width: 2; }
++.twin-curve .lbl { font-size: 9px; fill: var(--ink-3); }
++.twin-curve .val { font-size: 10px; font-weight: 650; fill: var(--ink); }
++.full-history { display: grid; gap: 6px; padding: 12px 14px; border-radius: 8px; background: var(--paper); }
++.twin-profile .btn { white-space: normal; text-align: left; line-height: 1.3; }
+diff -ruN a/app/static/js/views/library.js b/app/static/js/views/library.js
+--- a/app/static/js/views/library.js	2026-10-12 11:30:53.310307869 +0000
++++ b/app/static/js/views/library.js	2026-10-12 11:16:00.000000000 +0000
+@@ -318,6 +318,7 @@
+     catch (ex) { toast(ex.message); }
+   } });
+   const report = el("div", { class: "stack-lg" }, el("p", { class: "muted", text: "Building the report from saved games…" }));
++  const full = p.platform === "pgn" ? null : fullHistoryBox(p, body);
+   content.replaceChildren(
+     el("section", { class: "sheet stack" },
+       el("div", { class: "row between" }, el("div", {}, el("h2", { text: p.handle }),
+@@ -329,7 +330,8 @@
+         el("button", { class: "btn quiet small", type: "button", text: "Explore only this player", onclick: () => { L.selected = new Set([p.id]); L.tab = "explore"; render(body); } }),
+         el("button", { class: "btn quiet small", type: "button", text: "Their games", onclick: () => { L.selected = new Set([p.id]); L.tab = "games"; render(body); } }),
+         el("button", { class: "btn small", type: "button", text: twin.hasGame(p.id) ? "Continue your game vs their Twin" : "Practise against their Twin",
+-          onclick: () => { L.tab = "twin"; render(body); } }))),
++          onclick: () => { L.tab = "twin"; render(body); } })),
++      full),
+     report);
+   const a = account();
+   try {
+@@ -338,6 +340,32 @@
+   } catch (e) { fill(report, el("p", { class: "err", text: e.message })); }
+ }
+ 
++// Their whole career: a background download, page by page, that the Twin and the Explorer then use.
++function fullHistoryBox(p, body) {
++  const box = el("div", { class: "full-history" });
++  const out = el("div", { class: "stack" });
++  const draw = (st) => {
++    const btn = el("button", { class: "btn quiet small", type: "button", text: `Download full history (up to ${st.cap.toLocaleString()} games)`,
++      onclick: async () => {
++        btn.disabled = true;
++        try {
++          const r = await post(`/api/library/${p.id}/full`);
++          toast(r.message);
++          if (r.job_id) twin.watchJob(out, r.job_id, () => { toast(`${p.handle}'s full history is saved.`); render(body); });
++          else btn.disabled = false;
++        } catch (e) { toast(e.message); btn.disabled = false; }
++      } });
++    fill(box, el("b", { class: "small", text: "Their whole career" }),
++      el("p", { class: "small muted", text: st.full_at
++        ? `Full history downloaded ${new Date(st.full_at * 1000).toLocaleDateString()}: ${st.games.toLocaleString()} games. Update adds anything newer.`
++        : `${st.games.toLocaleString()} games saved so far. Downloading their full history gives the Explorer and their Twin far more to learn from (it runs in the background; big histories take a few minutes).` }),
++      st.full_at ? null : el("div", { class: "row" }, btn), out);
++    if (st.job_id) { btn.disabled = true; twin.watchJob(out, st.job_id, () => render(body)); }
++  };
++  api(`/api/library/${p.id}/full`).then(draw).catch(() => box.remove());
++  return box;
++}
++
+ /** Scout tab helper: the most recently opened saved players, as one-click chips. */
+ export async function savedChips(onOpen) {
+   let d;
+diff -ruN a/app/static/js/views/twin.js b/app/static/js/views/twin.js
+--- a/app/static/js/views/twin.js	2026-10-12 11:30:53.310161798 +0000
++++ b/app/static/js/views/twin.js	2026-10-12 11:20:22.000000000 +0000
+@@ -2,7 +2,7 @@
+ // The board is on the left; the Twin's reasoning (book or model, and what else it considered) is on the right;
+ // below are the Twin's profile and, after a game, a review. The game is kept in this browser so you can come back to it.
+ 
+-import { api, el, fill, post, store, toast, track } from "../core.js";
++import { api, el, fill, post, store, svg, toast, track } from "../core.js";
+ import { Board, boardSettings, sideToMove } from "../board.js";
+ import { openPosition } from "./common.js";
+ 
+@@ -66,7 +66,7 @@
+   const why = !st.engine ? "Stockfish isn't running on this server, so Twins can't be built here."
+     : !enough ? `The Twin needs at least ${st.min_games} games with these time controls; there are ${st.games}. Update the player or download more games.`
+       : !st.builds_left ? "You've used today's Twin builds. Try again tomorrow."
+-        : `It studies up to 40 of their ${st.games} games with the engine (about a minute or two), then you can play it.`;
++        : `First it studies ${(st.study && st.study.next_batch) || st.games} of their ${st.games} games with the engine (about ${Math.max(1, Math.round((((st.study && st.study.next_batch) || st.games) * 1.1) / 60))} min), newest first plus a spread across their history. Afterwards "Keep learning" studies more, and their book always uses every game.`;
+   return el("section", { class: "sheet stack twin-build" },
+     el("h3", { text: "Build their Twin" }),
+     el("ol", { class: "twin-steps small" },
+@@ -76,7 +76,7 @@
+     el("p", { class: "small muted", text: why }), el("div", { class: "row" }, btn), out);
+ }
+ 
+-async function watchJob(out, jobId, done) {
++export async function watchJob(out, jobId, done) {
+   const bar = el("div", { class: "syncbar twin-bar" }, el("i"));
+   const label = el("p", { class: "small muted", text: "Starting…" });
+   fill(out, label, bar);
+@@ -85,8 +85,8 @@
+     try { j = await api(`/api/jobs/${jobId}`); } catch (e) { fill(out, el("p", { class: "err", text: e.message })); return; }
+     if (j.state === "done") { toast("The Twin is ready."); done(); return; }
+     if (j.state === "error") { fill(out, el("p", { class: "err", text: j.error || "The build failed." })); return; }
+-    label.textContent = j.state === "queued" ? `Waiting for a free engine${j.position ? ` (${j.position} ahead)` : ""}…`
+-      : `${j.stage || "Working"}${j.total ? `: game ${j.done} of ${j.total}` : ""}…`;
++    label.textContent = j.state === "queued" ? `${j.stage && j.done ? `${j.stage}. ` : ""}Waiting for a free worker${j.position ? ` (${j.position} ahead)` : ""}…`
++      : `${j.stage || "Working"}${j.total && !/\d/.test(j.stage || "") ? `: ${j.done} of ${j.total}` : ""}…`;
+     bar.firstChild.style.width = j.total ? `${Math.round((100 * j.done) / j.total)}%` : "8%";
+     await new Promise((r) => setTimeout(r, 1500));
+   }
+@@ -104,21 +104,35 @@
+   const open = (key, label) => (p.openings && p.openings[key] ? el("p", { class: "small" }, el("b", { text: `${label}: ` }),
+     p.openings[key].map((o) => `${o.san} ${o.pct}%`).join(", ")) : null);
+   const tt = p.time_trouble || {};
+-  const rebuild = el("button", { class: "btn quiet small", type: "button", text: t.stale ? "Rebuild with their new games" : "Rebuild",
+-    onclick: async () => {
+-      try {
+-        const r = await post(`/api/twin/${player.id}/build`, { time_classes: tc ? tc.split(",") : null });
+-        if (r.job_id) { rebuild.disabled = true; watchJob(note, r.job_id, () => render(content, player)); } else toast(r.message);
+-      } catch (e) { toast(e.message); }
+-    } });
++  const sd = st.study || {};
+   const note = el("div", { class: "stack" });
++  const learnText = sd.next_batch > 0 ? `Keep learning: study ${sd.next_batch} more of their games`
++    : t.stale ? "Refit with their new games" : null;
++  const learn = learnText ? el("button", { class: "btn small", type: "button", text: learnText, onclick: async () => {
++    try {
++      const r = await post(`/api/twin/${player.id}/build`, { time_classes: tc ? tc.split(",") : null });
++      if (r.job_id) { learn.disabled = true; toast(r.message); watchJob(note, r.job_id, () => render(content, player)); } else toast(r.message);
++    } catch (e) { toast(e.message); }
++  } }) : null;
++  const studied = sd.available ? Math.round((100 * sd.studied) / sd.available) : 0;
++  const learnNote = sd.next_batch > 0 ? null : sd.studied >= sd.available
++    ? "It has studied every game in the library for these time controls."
++    : `It has studied ${sd.studied} games, your plan's limit.`;
+   return el("div", { class: "twin-profile" },
+     el("section", { class: "sheet stack" }, el("h3", { text: "How faithful is it?" }),
+       el("div", { class: "twin-big" }, el("b", { text: pct(f.twin_top3) }),
+         el("span", { class: "small", text: `of their real moves were among the Twin's top 3 choices, in games it never saw (Stockfish's top 3: ${pct(f.engine_top3)}).` })),
+       el("p", { class: "small muted", text: `First choice exactly right: Twin ${pct(f.twin_top1)}, Stockfish ${pct(f.engine_top1)}.${f.book_top1 != null ? ` Their opening moves predicted by their own book: ${f.book_top1}%.` : ""}` }),
+-      el("p", { class: "tiny faint", text: `Learned from ${t.decisions} of their decisions in ${t.games} games (confidence: ${p.confidence}). Built ${new Date(t.built_at * 1000).toLocaleDateString()}, games up to ${t.newest_game || "–"}.` }),
+-      el("div", { class: "row" }, rebuild), note),
++      learningCurve(p.learning_curve || []),
++      el("div", { class: "twin-study" },
++        el("div", { class: "row between" }, el("b", { class: "small", text: `Studied ${sd.studied ?? t.games} of ${sd.available ?? "–"} games` }),
++          el("span", { class: "tiny faint", text: `${studied}%` })),
++        el("div", { class: "twin-acc-track" }, el("i", { style: { width: `${studied}%` } })),
++        el("p", { class: "tiny faint", text: `${t.decisions.toLocaleString()} of their decisions, from ${p.oldest_game || "–"} to ${t.newest_game || "–"}. Recent games count more (a game two years older counts half). Their opening book uses every game in the library.` })),
++      learn ? el("div", { class: "row" }, learn) : el("p", { class: "tiny faint", text: learnNote }),
++      sd.available < 300 && player.platform !== "pgn" ? el("p", { class: "tiny" },
++        "More games make a more faithful Twin. On their player page, ", el("b", { text: "Download full history" }), " gives it their whole career to learn from.") : null,
++      note),
+     el("section", { class: "sheet stack" }, el("h3", { text: "How they play" }),
+       ...PHASES.map(([k, label]) => bar(label, p.accuracy && p.accuracy[k])),
+       el("p", { class: "small muted", text: `${p.blunders_per_100 ?? "–"} blunders and ${p.mistakes_per_100 ?? "–"} mistakes per 100 moves.${tt.moves >= 15 && tt.accuracy != null ? ` In time trouble: ${tt.accuracy}% accuracy (${tt.calm_accuracy}% otherwise).` : ""}` }),
+@@ -129,6 +143,28 @@
+       el("p", { class: "tiny faint", text: "The Twin plays these from their own games, weighting recent games more." })));
+ }
+ 
++// Faithfulness as more of their games are used (each point: fitted on that many games, tested on the same held-out games).
++function learningCurve(points) {
++  if (points.length < 2) return null;
++  const W = 260, H = 96, P = 22;
++  const xs = points.map((p) => Math.log(p.games)), ys = points.map((p) => p.twin_top3 ?? 0);
++  const x0 = Math.min(...xs), x1 = Math.max(...xs);
++  const y0 = Math.max(0, Math.min(...ys) - 8), y1 = Math.min(100, Math.max(...ys) + 4);
++  const X = (v) => P + ((v - x0) / (x1 - x0 || 1)) * (W - 2 * P);
++  const Y = (v) => H - P + 6 - ((v - y0) / (y1 - y0 || 1)) * (H - P - 10);
++  const line = points.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(ys[i]).toFixed(1)}`).join(" ");
++  const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "twin-curve", role: "img",
++    "aria-label": `Faithfulness rises from ${ys[0]}% with ${points[0].games} games to ${ys[ys.length - 1]}% with ${points[points.length - 1].games} games` },
++    svg("line", { x1: P, x2: W - P, y1: H - P + 6, y2: H - P + 6, class: "axis" }),
++    svg("path", { d: line, class: "curve" }),
++    ...points.map((p, i) => svg("circle", { cx: X(xs[i]), cy: Y(ys[i]), r: 3.2, class: "dot" })),
++    ...points.map((p, i) => svg("text", { x: X(xs[i]), y: H - 3, "text-anchor": "middle", class: "lbl" }, String(p.games))),
++    svg("text", { x: X(xs[0]), y: Y(ys[0]) - 7, "text-anchor": "start", class: "val" }, `${ys[0]}%`),
++    svg("text", { x: X(xs[xs.length - 1]), y: Y(ys[ys.length - 1]) - 7, "text-anchor": "end", class: "val" }, `${ys[ys.length - 1]}%`));
++  return el("figure", { class: "twin-curve-wrap" }, chart,
++    el("figcaption", { class: "tiny faint", text: "Learning curve: how often their real move is in the Twin's top 3, by how many of their games it learned from. A flat line means it already knows them well." }));
++}
++
+ // ---------------- setting up a game ----------------
+ function setupCard(box, player, st, tc) {
+   let color = "white";
+diff -ruN a/app/static/sw.js b/app/static/sw.js
+--- a/app/static/sw.js	2026-10-12 11:30:53.300346689 +0000
++++ b/app/static/sw.js	2026-10-12 11:20:37.000000000 +0000
+@@ -1,6 +1,6 @@
+ // Plateau Breaker service worker: makes the app installable and opens instantly.
+ // Pages and code: network first, cached copy if offline. API calls are never cached.
+-const VERSION = "pb-v0.9.0";
++const VERSION = "pb-v1.0.0";
+ const SHELL = ["/", "/static/app.css", "/static/js/main.js", "/static/js/core.js", "/static/js/board.js", "/static/js/dna.js",
+   "/static/js/landing.js", "/static/js/plans.js", "/static/js/shell.js", "/static/js/support.js", "/static/js/views/common.js",
+   "/static/js/views/diagnose.js", "/static/js/views/train.js", "/static/js/views/prepare.js", "/static/js/views/coach.js",
+diff -ruN a/app/store.py b/app/store.py
+--- a/app/store.py	2026-10-12 11:30:53.315998706 +0000
++++ b/app/store.py	2026-10-12 11:11:14.000000000 +0000
+@@ -216,6 +216,16 @@
+     profile     TEXT NOT NULL,          -- accuracy, style, openings, faithfulness (JSON)
+     PRIMARY KEY (player_id, tc_key)
+ );
++CREATE TABLE IF NOT EXISTS twin_games (   -- each library game studied once for the Twin (compressed decisions)
++    game_ref    INTEGER PRIMARY KEY,    -- lib_games.id
++    player_id   INTEGER NOT NULL,
++    version     INTEGER NOT NULL,
++    depth       INTEGER NOT NULL,
++    n           INTEGER NOT NULL,
++    data        BLOB NOT NULL,
++    studied_at  REAL NOT NULL
++);
++CREATE INDEX IF NOT EXISTS twin_games_player ON twin_games (player_id);
+ CREATE TABLE IF NOT EXISTS kv (
+     k          TEXT PRIMARY KEY,
+     v          TEXT NOT NULL,
+@@ -261,6 +271,8 @@
+                 c.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")  # names/decls are constants above
+         if "consent_at" not in cols("students"):
+             c.execute("ALTER TABLE students ADD COLUMN consent_at REAL")  # coach confirmed the student (or a parent) agreed
++        if "full_at" not in cols("lib_players"):
++            c.execute("ALTER TABLE lib_players ADD COLUMN full_at REAL")  # when a full-history download last finished
+         if "plan" not in cols("upgrade_requests"):
+             c.execute("ALTER TABLE upgrade_requests ADD COLUMN plan TEXT NOT NULL DEFAULT 'pro'")
+ 
+@@ -532,6 +544,7 @@
+                 c.execute("DELETE FROM lib_positions WHERE game_ref IN (SELECT id FROM lib_games WHERE player_id = ?)", (pid,))
+                 c.execute("DELETE FROM lib_games WHERE player_id = ?", (pid,))
+                 c.execute("DELETE FROM twins WHERE player_id = ?", (pid,))
++                c.execute("DELETE FROM twin_games WHERE player_id = ?", (pid,))
+                 c.execute("DELETE FROM lib_players WHERE id = ?", (pid,))
+             c.execute("DELETE FROM users WHERE id = ?", (user_id,))
+         return accounts
+diff -ruN a/app/sync.py b/app/sync.py
+--- a/app/sync.py	2026-10-12 11:30:53.203426132 +0000
++++ b/app/sync.py	2026-10-12 11:11:53.000000000 +0000
+@@ -37,6 +37,8 @@
+ SYNC_OVERLAP_S = 3600  # re-ask for the last hour on incremental syncs; duplicates are skipped by id
+ KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
+ MAX_RATE_RETRIES = 3
++LIBRARY_PAGE = 1000  # games per Lichess page in a full-history download
++LIBRARY_MONTHS_PER_TURN = 6  # Chess.com monthly archives per job turn
+ PLATFORM_LABELS = {"lichess": "Lichess", "chesscom": "Chess.com", "pgn": "ChessBase / PGN", "demo": "Demo"}
+ 
+ 
+@@ -153,7 +155,7 @@
+ 
+     def handlers(self) -> dict[str, Callable]:
+         return {"import": self.handle_import, "autosync": self.handle_import, "prep": self.handle_prep,
+-                "preview": self.handle_preview, "twin": self.handle_twin}
++                "preview": self.handle_preview, "twin": self.handle_twin, "library_full": self.handle_library_full}
+ 
+     # ---- import ----------------------------------------------------------------------------
+     def _fetch(self, account: dict, p: dict) -> list[GameRecord]:
+@@ -261,20 +263,99 @@
+ 
+     # ---- Opponent Twin: fit a practice bot to a library player's games ------------------------------
+     def handle_twin(self, job: dict, ctx) -> dict:
++        """Study a batch of the player's games (each once, ever) in chunks, then fit the Twin on everything studied."""
++        import random as _random
++
+         from . import twin as twin_mod
+         from .library import Library
+ 
+-        p = job["payload"]
++        p = dict(job["payload"])
+         lib = Library(self.store)
+-        if not lib.player(p["player_id"]):
++        pid, classes, depth = p["player_id"], p.get("time_classes"), self.settings.twin_depth
++        if not lib.player(pid):
+             raise JobError("That player was removed from the library.")
+-        ctx.progress(stage="Reading their games")
++        if "queue" not in p:
++            _, available = twin_mod.study_counts(self.store, pid, classes, depth)
++            if available < twin_mod.MIN_GAMES:
++                raise JobError(f"The Twin needs at least {twin_mod.MIN_GAMES} games; there are {available} for these time controls.")
++            p["queue"] = twin_mod.pick_unstudied(self.store, pid, classes, p.get("budget", self.settings.twin_games), depth)
++            p["total"], p["done"] = len(p["queue"]), 0
++        chunk, rest = p["queue"][:twin_mod.STUDY_CHUNK], p["queue"][twin_mod.STUDY_CHUNK:]
++        if chunk:
++            ctx.progress(stage="Studying their decisions with Stockfish", total=p["total"], done=p["done"])
++            twin_mod.study_games(self.store, lib, pid, chunk, ctx.resources["engines"].main, depth,
++                                 _random.Random(job["id"] + str(p["done"])),
++                                 on_game=lambda i: ctx.progress(done=p["done"] + i))
++            p["done"] += len(chunk)
++        if rest:
++            p["queue"] = rest
++            raise Requeue(payload=p, stage=f"Studied {p['done']} of {p['total']} games; continuing shortly")
+         try:
+-            t = twin_mod.build(self.store, lib, p["player_id"], p.get("time_classes"), ctx.resources["engines"].main,
+-                               max_games=self.settings.twin_games, depth=self.settings.twin_depth, progress=ctx.progress)
++            t = twin_mod.fit_twin(self.store, lib, pid, classes, depth, progress=ctx.progress)
+         except ValueError as exc:
+             raise JobError(str(exc)) from exc
+-        return {"player_id": p["player_id"], "tc_key": t["tc_key"], "games": t["games"], "decisions": t["decisions"]}
++        return {"player_id": pid, "tc_key": t["tc_key"], "games": t["games"], "decisions": t["decisions"], "studied_now": p["total"]}
++
++    # ---- Opponent Library: download a player's whole history, page by page -----------------------------
++    def handle_library_full(self, job: dict, ctx) -> dict:
++        from .library import Library
++        from .sources import chesscom_archives, chesscom_month, lichess_history_page
++
++        p = dict(job["payload"])
++        lib = Library(self.store)
++        player = lib.player(p["player_id"])
++        if not player:
++            raise JobError("That player was removed from the library.")
++        handle, cap = player["handle"], p["cap"]
++        p.setdefault("seen", 0)
++        p.setdefault("added", 0)
++        p.setdefault("started", time.time())
++        done = False
++        try:
++            if player["platform"] == "lichess":
++                want = min(LIBRARY_PAGE, cap - p["seen"])
++                pgn, n, oldest = lichess_history_page(handle, want, p.get("until"))
++                recs = self._parse_quietly(pgn, handle) if n else []
++                p["added"] += lib.add_games(player["id"], recs)
++                p["seen"] += n
++                if recs:
++                    p["oldest"] = min(r.played_at for r in recs)
++                p["until"] = oldest - 1 if oldest else None
++                done = n < want or not oldest or p["seen"] >= cap
++            else:
++                if "archives" not in p:
++                    p["archives"] = chesscom_archives(handle)
++                    p["months"] = len(p["archives"])
++                for _ in range(LIBRARY_MONTHS_PER_TURN):
++                    if not p["archives"] or p["seen"] >= cap:
++                        break
++                    url = p["archives"].pop(0)
++                    recs = self._parse_quietly(chesscom_month(url), handle)[: cap - p["seen"]]
++                    p["added"] += lib.add_games(player["id"], recs)
++                    p["seen"] += len(recs)
++                    p["oldest"] = "/".join(url.rstrip("/").split("/")[-2:])
++                done = not p["archives"] or p["seen"] >= cap
++        except RateLimited as exc:
++            if job["attempts"] >= 3 * MAX_RATE_RETRIES:
++                raise JobError(str(exc)) from exc
++            raise Requeue(payload=p, delay=65, stage=f"{exc} Continuing automatically in a minute.") from exc
++        except GameImportError as exc:
++            if not p["seen"]:
++                raise JobError(str(exc)) from exc
++            done = True  # keep what we have
++        back = f" (back to {p['oldest']})" if p.get("oldest") else ""
++        ctx.progress(stage=f"Downloaded {p['seen']:,} games{back}", done=min(p["seen"], cap), total=cap)
++        if not done:
++            raise Requeue(payload=p, stage=f"Downloaded {p['seen']:,} games{back}; continuing")
++        lib.finish_full(player["id"], p["started"])
++        return {"player_id": player["id"], "seen": p["seen"], "added": p["added"], "games": lib.player(player["id"])["games"]}
++
++    @staticmethod
++    def _parse_quietly(pgn: str, handle: str) -> list[GameRecord]:
++        try:
++            return parse_pgn(pgn, handle) if pgn.strip() else []
++        except GameImportError:
++            return []
+ 
+     # ---- instant preview (no account needed) ---------------------------------------------------
+     def handle_preview(self, job: dict, ctx) -> dict:
+diff -ruN a/app/twin.py b/app/twin.py
+--- a/app/twin.py	2026-10-12 11:30:53.316208200 +0000
++++ b/app/twin.py	2026-10-12 11:11:19.000000000 +0000
+@@ -47,9 +47,9 @@
+ 
+ from .analysis import PIECE_VALUE, _time_pressure, classify, game_phase, move_accuracy, win_percent
+ from .games import GameRecord
+-from .library import position_key
++from .library import position_key, record_from_json
+ 
+-VERSION = 1
++VERSION = 2  # bump when features change: older studies and Twins are then rebuilt
+ MIN_GAMES = 10
+ FEATURES = ["loss_opening", "loss_middlegame", "loss_endgame", "loss_pressure", "best", "top3", "capture", "trade", "check",
+             "castle", "pawn_push", "forward", "king_hunt", "queen_early", "same_piece", "king_walk", "recapture", "escape",
+@@ -171,6 +171,22 @@
+     return ucis, rows, losses
+ 
+ 
++_PAIRS: dict[tuple[int, float], tuple[int, float]] = {}
++
++
++def sparse(row: list[float]) -> tuple:
++    """A feature row as ((index, value), ...) for its non-zero features. Values are rounded and the pairs shared,
++    so tens of thousands of stored decisions fit in a few tens of megabytes."""
++    out = []
++    for k, v in enumerate(row):
++        if v:
++            v = round(v, 3)
++            if v:
++                key = (k, v)
++                out.append(_PAIRS.setdefault(key, key))
++    return tuple(out)
++
++
+ # ---- the choice model --------------------------------------------------------------------------------
+ def prior(rating: float | None) -> list[float]:
+     """Sensible weights before seeing any games: stronger players lose less per move."""
+@@ -183,33 +199,32 @@
+     return b
+ 
+ 
+-def probabilities(beta: list[float], rows: list[list[float]], loss_scale: float = 1.0) -> list[float]:
+-    u = []
+-    for f in rows:
+-        s = 0.0
+-        for k in range(NF):
+-            w = beta[k] * (loss_scale if k in LOSS else 1.0)
+-            s += w * f[k]
+-        u.append(s)
++def probabilities(beta: list[float], rows, loss_scale: float = 1.0) -> list[float]:
++    """Choice probabilities for sparse feature rows (see sparse())."""
++    w = [beta[k] * (loss_scale if k in LOSS else 1.0) for k in range(NF)]
++    u = [sum(w[k] * v for k, v in row) for row in rows]
+     m = max(u)
+     ex = [math.exp(x - m) for x in u]
+     z = sum(ex)
+     return [x / z for x in ex]
+ 
+ 
+-def fit(decisions: list[tuple[list[list[float]], int]], beta0: list[float], lam: float = 2.0, iters: int = 15,
+-        with_se: bool = False):
+-    """Maximum-likelihood conditional logit with a Gaussian prior around beta0 (Newton's method).
++def fit(decisions: list[tuple], beta0: list[float], lam: float = 2.0, iters: int = 15, with_se: bool = False):
++    """Maximum-likelihood conditional logit with a Gaussian prior around beta0 (Newton's method with a line search).
+ 
+-    Uses H = sum_c p_c f_c f_c^T - m m^T with sparse feature vectors, so a thousand decisions fit in about a second.
++    `decisions` are (sparse rows, chosen index) or (sparse rows, chosen index, weight): weights let recent games
++    count more. They are normalised to average 1, so the prior keeps the same pull. Uses H = sum_c p_c f_c f_c^T
++    - m m^T on sparse rows, so a thousand decisions fit in well under a second.
+     """
+-    sparse = [([[(k, v) for k, v in enumerate(f) if v] for f in rows], chosen) for rows, chosen in decisions]
++    ws = [d[2] if len(d) > 2 else 1.0 for d in decisions]
++    mean_w = (sum(ws) / len(ws)) if ws else 1.0
++    sparse = [(d[0], d[1], w / mean_w) for d, w in zip(decisions, ws, strict=True)]
+     beta = list(beta0)
+     h: list[list[float]] = []
+     for _ in range(iters):
+         g = [-lam * (beta[k] - beta0[k]) for k in range(NF)]
+         h = [[(lam if i == j else 0.0) for j in range(NF)] for i in range(NF)]  # negative Hessian
+-        for rows, chosen in sparse:
++        for rows, chosen, wt in sparse:
+             u = [sum(beta[k] * v for k, v in nz) for nz in rows]
+             mx = max(u)
+             ex = [math.exp(x - mx) for x in u]
+@@ -221,21 +236,23 @@
+                     continue
+                 for k, v in nz:
+                     mean[k] += pc * v
++                pw = pc * wt
+                 for i, vi in nz:
+                     hi = h[i]
+-                    pvi = pc * vi
++                    pvi = pw * vi
+                     for j, vj in nz:
+                         hi[j] += pvi * vj
+             for k, v in rows[chosen]:
+-                g[k] += v
++                g[k] += wt * v
+             for k in range(NF):
+                 mk = mean[k]
+                 if mk:
+-                    g[k] -= mk
++                    g[k] -= wt * mk
+                     hk = h[k]
++                    wmk = wt * mk
+                     for j in range(NF):
+                         if mean[j]:
+-                            hk[j] -= mk * mean[j]
++                            hk[j] -= wmk * mean[j]
+         step = _solve(h, g)
+         # Backtracking line search: a full Newton step can overshoot when a few moves lose a lot.
+         current = _objective(sparse, beta, beta0, lam)
+@@ -263,10 +280,10 @@
+ 
+ def _objective(sparse, beta: list[float], beta0: list[float], lam: float) -> float:
+     total = -0.5 * lam * sum((beta[k] - beta0[k]) ** 2 for k in range(NF))
+-    for rows, chosen in sparse:
++    for rows, chosen, wt in sparse:
+         u = [sum(beta[k] * v for k, v in nz) for nz in rows]
+         mx = max(u)
+-        total += u[chosen] - mx - math.log(sum(math.exp(x - mx) for x in u))
++        total += wt * (u[chosen] - mx - math.log(sum(math.exp(x - mx) for x in u)))
+     return total
+ 
+ 
+@@ -377,7 +394,7 @@
+                     if uci in ucis:
+                         chosen = ucis.index(uci)
+                         best_cp = max(cp for _, cp in cands)
+-                        out.append({"game": gi, "rows": rows, "chosen": chosen, "loss": losses[chosen], "phase": game_phase(board),
++                        out.append({"game": gi, "rows": [sparse(r) for r in rows], "chosen": chosen, "loss": losses[chosen], "phase": game_phase(board),
+                                     "pressure": pressure, "engine_top": ucis.index(max(cands, key=lambda x: x[1])[0]),
+                                     "best_es": es(best_cp), "played_es": es(dict(cands)[uci]), "ply": ply})
+             if mover_is_them:
+@@ -403,7 +420,7 @@
+         t1 += order[0] == d["chosen"]
+         t3 += d["chosen"] in order[:3]
+         e1 += d["engine_top"] == d["chosen"]
+-        e3 += d["rows"][d["chosen"]][top3] == 1.0
++        e3 += any(k == top3 for k, _ in d["rows"][d["chosen"]])
+     n = len(test)
+     return {"twin_top1": round(100 * t1 / n), "engine_top1": round(100 * e1 / n), "twin_top3": round(100 * t3 / n),
+             "engine_top3": round(100 * e3 / n), "decisions": n}
+@@ -427,42 +444,189 @@
+     return round(100 * hits / total) if total else None
+ 
+ 
+-def build(store, library, player_id: int, classes: list[str] | None, engine, *, max_games: int = 40, depth: int = 9,
+-          seed: int = 7, progress=None) -> dict:
+-    """Fit a Twin for this player and save it. Returns the saved twin."""
++# ---- studying games (each game once, ever) -----------------------------------------------------------------
++# A player's history can run to thousands of games, and the engine is the expensive part (about a second per
++# game). So every game is studied once and the result is kept (table twin_games). Each build studies the next
++# batch, and a rebuild only fits the model again, which takes seconds.
++PHASE_CODE = {"opening": 0, "middlegame": 1, "endgame": 2}
++PHASE_NAME = {v: k for k, v in PHASE_CODE.items()}
++MODEL_HALF_LIFE_DAYS = 730  # in the model, a game two years older counts half as much (players change)
++MAX_FIT_DECISIONS = 24_000  # the model is fitted on at most this many of the most recent decisions
++STUDY_CHUNK = 10  # games per job turn, so a long study shares the workers fairly
++
++
++def pack(decisions: list[dict]) -> bytes:
++    import json
++    import zlib
++
++    rows = [[[list(p) for p in r] for r in d["rows"]] for d in decisions]
++    meta = [[d["chosen"], round(d["loss"], 4), PHASE_CODE[d["phase"]], int(d["pressure"]), d["engine_top"],
++             round(d["best_es"], 4), round(d["played_es"], 4), d["ply"]] for d in decisions]
++    return zlib.compress(json.dumps([rows, meta], separators=(",", ":")).encode(), 6)
++
++
++def unpack(blob: bytes) -> list[dict]:
++    import json
++    import zlib
++
++    rows, meta = json.loads(zlib.decompress(blob))
++    out = []
++    for r, m in zip(rows, meta, strict=True):
++        srows = []
++        for row in r:
++            pairs = []
++            for k, v in row:
++                key = (k, v)
++                pairs.append(_PAIRS.setdefault(key, key))
++            srows.append(tuple(pairs))
++        out.append({"rows": srows, "chosen": m[0], "loss": m[1], "phase": PHASE_NAME[m[2]], "pressure": bool(m[3]),
++                    "engine_top": m[4], "best_es": m[5], "played_es": m[6], "ply": m[7]})
++    return out
++
++
++def _tc_sql(classes) -> tuple[str, list]:
+     wanted = [c for c in (classes or []) if c in TIME_CLASSES]
+-    records = library.records(player_id)
+-    if wanted:
+-        records = [r for r in records if r.time_class in wanted]
+-    records = records[:max_games]
+-    if len(records) < MIN_GAMES:
+-        raise ValueError(f"The Twin needs at least {MIN_GAMES} games; there are {len(records)} for these time controls.")
+-    rng = random.Random(seed)
++    if wanted and len(wanted) < len(TIME_CLASSES):
++        return f" AND g.time_class IN ({','.join('?' * len(wanted))})", wanted
++    return "", []
++
++
++def study_counts(store, player_id: int, classes, depth: int) -> tuple[int, int]:
++    """(games studied, games available) for this player and these time controls."""
++    extra, args = _tc_sql(classes)
++    with store._conn() as c:
++        available = c.execute(f"SELECT COUNT(*) FROM lib_games g WHERE g.player_id = ?{extra}", [player_id, *args]).fetchone()[0]
++        studied = c.execute(f"SELECT COUNT(*) FROM twin_games t JOIN lib_games g ON g.id = t.game_ref WHERE t.player_id = ? "
++                            f"AND t.version = ? AND t.depth = ?{extra}", [player_id, VERSION, depth, *args]).fetchone()[0]
++    return studied, available
++
++
++def pick_unstudied(store, player_id: int, classes, budget: int, depth: int) -> list[int]:
++    """Which games to study next: two thirds the newest not yet studied, one third spread across the rest of
++    their history (so even the first batch sees how they played over the years)."""
++    if budget <= 0:
++        return []
++    extra, args = _tc_sql(classes)
++    with store._conn() as c:
++        rows = [r[0] for r in c.execute(f"SELECT g.id FROM lib_games g WHERE g.player_id = ?{extra} "
++                                        "ORDER BY g.played_at DESC, g.id DESC", [player_id, *args])]
++        done = {r[0] for r in c.execute("SELECT game_ref FROM twin_games WHERE player_id = ? AND version = ? AND depth = ?",
++                                        (player_id, VERSION, depth))}
++    todo = [r for r in rows if r not in done]
++    newest = todo[: max(1, (2 * budget) // 3)]
++    rest = todo[len(newest):]
++    k = budget - len(newest)
++    step = len(rest) / k if k > 0 and len(rest) > k else 1.0
++    spread = [rest[int(i * step)] for i in range(min(k, len(rest)))]
++    return newest + spread
++
++
++def study_games(store, library, player_id: int, game_refs: list[int], engine, depth: int, rng: random.Random,
++                on_game=None) -> int:
++    """Study these games (each once, ever) and keep the results. Returns how many decisions were recorded."""
+     limit = chess.engine.Limit(depth=depth, time=0.5)
+-    decisions = collect_decisions(records, engine, limit, rng,
+-                                  progress=(lambda i, n: progress(stage="Studying their decisions", done=i, total=n)) if progress else None)
+-    if len(decisions) < 30:
++    n = 0
++    for i, ref in enumerate(game_refs, 1):
++        found = library.game(ref)
++        if found:
++            decisions = collect_decisions([found[1]], engine, limit, rng)
++            with store._conn() as c:
++                c.execute("INSERT OR REPLACE INTO twin_games (game_ref, player_id, version, depth, n, data, studied_at) "
++                          "VALUES (?, ?, ?, ?, ?, ?, ?)", (ref, player_id, VERSION, depth, len(decisions), pack(decisions), time.time()))
++            n += len(decisions)
++        if on_game:
++            on_game(i)
++    return n
++
++
++def _recency(played_at: str, newest: dt.date) -> float:
++    try:
++        d = dt.date(*map(int, played_at[:10].split(".")))
++    except (ValueError, TypeError):
++        return 0.5
++    return 0.5 ** (max(0, (newest - d).days) / MODEL_HALF_LIFE_DAYS)
++
++
++def fit_twin(store, library, player_id: int, classes, depth: int, *, seed: int = 7, progress=None) -> dict:
++    """Fit the Twin on everything studied so far (most recent first, weighted by recency) and save it.
++    Also measures faithfulness on held-out games, and a learning curve: faithfulness as more games are used."""
++    wanted = [c for c in (classes or []) if c in TIME_CLASSES]
++    extra, args = _tc_sql(wanted)
++    with store._conn() as c:
++        rows = c.execute(f"SELECT t.game_ref, t.data, g.played_at, g.game_id, g.data AS rec FROM twin_games t JOIN lib_games g "
++                         f"ON g.id = t.game_ref WHERE t.player_id = ? AND t.version = ? AND t.depth = ?{extra} "
++                         "ORDER BY g.played_at DESC, g.id DESC", [player_id, VERSION, depth, *args]).fetchall()
++    games, total = [], 0
++    for r in rows:
++        decs = unpack(r["data"])
++        if not decs:
++            continue
++        games.append({"ref": r["game_ref"], "played_at": r["played_at"], "game_id": r["game_id"], "decisions": decs, "rec": r["rec"]})
++        total += len(decs)
++        if total >= MAX_FIT_DECISIONS:
++            break
++    if len(games) < MIN_GAMES:
++        raise ValueError(f"The Twin needs at least {MIN_GAMES} studied games; there are {len(games)}.")
++    if total < 30:
+         raise ValueError("Not enough of their own moves to learn from (fewer than 30). Add more games.")
+     if progress:
+         progress(stage="Fitting their decision model")
++    try:
++        newest = dt.date(*map(int, games[0]["played_at"][:10].split(".")))
++    except (ValueError, TypeError):
++        newest = dt.date.today()
++    for i, g in enumerate(games):
++        g["weight"] = _recency(g["played_at"], newest)
++        for d in g["decisions"]:
++            d["game"] = i
++    records = [record_from_json(g["rec"]) for g in games[:300]]  # rating, castling and the book check need the games
+     ratings = sorted(r.player_rating for r in records if r.player_rating)
+     rating = ratings[len(ratings) // 2] if ratings else None
+     beta0 = prior(rating)
+-    # Faithfulness: fit on 80% of games, test on the other 20%.
+-    test_games = {i for i in range(len(records)) if i % 5 == 4}
+-    train = [(d["rows"], d["chosen"]) for d in decisions if d["game"] not in test_games]
+-    test = [d for d in decisions if d["game"] in test_games]
+-    beta_train = fit(train, beta0)
++    # Faithfulness on held-out games (every fifth game), and the learning curve on the same test set.
++    test_idx = {i for i in range(len(games)) if i % 5 == 4}
++    test = [d for i in sorted(test_idx) for d in games[i]["decisions"]]
++    train_games = [i for i in range(len(games)) if i not in test_idx]
++    rng = random.Random(seed)
++    order = train_games[:]
++    rng.shuffle(order)
++    sizes = [n for n in (10, 25, 50, 100, 200, 400, 800) if n < len(order)] + [len(order)]
++    curve = []
++    beta_train = beta0
++    for n in sizes:
++        subset = order[:n]
++        data = [(d["rows"], d["chosen"], games[i]["weight"]) for i in subset for d in games[i]["decisions"]]
++        beta_n = fit(data, beta0)
++        ev = evaluate(beta_n, test)
++        curve.append({"games": n, "twin_top3": ev["twin_top3"], "twin_top1": ev["twin_top1"]})
++        beta_train = beta_n
+     faith = evaluate(beta_train, test)
+-    held_out_ids = {records[i].game_id for i in test_games}
+-    faith["book_top1"] = book_coverage(store, player_id, [records[i] for i in sorted(test_games)], wanted, held_out_ids)
+-    beta, se = fit([(d["rows"], d["chosen"]) for d in decisions], beta0, with_se=True)
++    held_out = [records[i] for i in sorted(test_idx) if i < len(records)][:40]
++    faith["book_top1"] = book_coverage(store, player_id, held_out, wanted, {g.game_id for g in held_out})
++    all_data = [(d["rows"], d["chosen"], g["weight"]) for g in games for d in g["decisions"]]
++    beta, se = fit(all_data, beta0, with_se=True)
++    decisions = [d for g in games for d in g["decisions"]]
+     prof = profile(decisions, beta, beta0, records, store, player_id, wanted, se)
+-    prof["faithfulness"] = faith
+-    prof["rating"] = rating
+-    twin = save(store, player_id, tc_key(wanted), beta, prof, len(records), len(decisions),
+-                newest=max((r.played_at for r in records), default=""))
+-    return twin
++    studied, available = study_counts(store, player_id, wanted, depth)
++    prof.update(faithfulness=faith, rating=rating, learning_curve=curve, studied=studied, available=available,
++                used_games=len(games), oldest_game=games[-1]["played_at"], half_life_days=MODEL_HALF_LIFE_DAYS)
++    return save(store, player_id, tc_key(wanted), beta, prof, len(games), len(decisions),
++                newest=max((g["played_at"] for g in games), default=""))
++
++
++def build(store, library, player_id: int, classes: list[str] | None, engine, *, max_games: int = 40, depth: int = 9,
++          seed: int = 7, progress=None) -> dict:
++    """Study up to `max_games` more of their games, then fit and save the Twin (all in one go: scripts and tests;
++    the app does the same in chunks through the job queue)."""
++    wanted = [c for c in (classes or []) if c in TIME_CLASSES]
++    _, available = study_counts(store, player_id, wanted, depth)
++    if available < MIN_GAMES:
++        raise ValueError(f"The Twin needs at least {MIN_GAMES} games; there are {available} for these time controls.")
++    refs = pick_unstudied(store, player_id, wanted, max_games, depth)
++    rng = random.Random(seed)
++    study_games(store, library, player_id, refs, engine, depth, rng,
++                on_game=(lambda i: progress(stage="Studying their decisions", done=i, total=len(refs))) if progress else None)
++    return fit_twin(store, library, player_id, wanted, depth, seed=seed, progress=progress)
+ 
+ 
+ def profile(decisions: list[dict], beta: list[float], beta0: list[float], records: list[GameRecord], store, player_id: int,
+@@ -578,7 +742,7 @@
+         mv = rng.choice(legal)
+         return {"uci": mv.uci(), "san": board.san(mv), "source": "model", "why": "", "alternatives": []}
+     ucis, rows, losses = decision_rows(board, cands, False, prev_to, opp_to)
+-    p = probabilities(twin["params"], rows, GOOD_DAY if mode == "good_day" else 1.0)
++    p = probabilities(twin["params"], [sparse(r) for r in rows], GOOD_DAY if mode == "good_day" else 1.0)
+     i = _weighted(rng, list(range(len(ucis))), p)
+     mv = chess.Move.from_uci(ucis[i])
+     best = board.san(chess.Move.from_uci(max(cands, key=lambda x: x[1])[0]))
+diff -ruN a/deploy/.env.example b/deploy/.env.example
+--- a/deploy/.env.example	2026-10-12 11:30:53.040920961 +0000
++++ b/deploy/.env.example	2026-10-12 11:20:38.000000000 +0000
+@@ -31,6 +31,14 @@
+ # INFO, or WARNING to log less
+ LOG_LEVEL=INFO
+ 
++# --- Opponent Library and Twins ------------------------------------------------------------
++# most games kept per library player by "Download full history" (about 6.5 KB each with the position index)
++LIBRARY_FULL_MAX=10000
++# games an Opponent Twin studies per build ("Keep learning" studies the next batch); about 1 s each
++TWIN_GAMES=150
++# engine depth for the Twin's candidates (when studying and when playing)
++TWIN_DEPTH=9
++
+ # --- Engine and queue -------------------------------------------------------------------
+ ENGINE_DEPTH=12
+ ENGINE_TIME=0.08
+diff -ruN a/scripts/twin_validate.py b/scripts/twin_validate.py
+--- a/scripts/twin_validate.py	2026-10-12 11:30:53.317296336 +0000
++++ b/scripts/twin_validate.py	2026-10-12 11:15:16.000000000 +0000
+@@ -106,7 +106,8 @@
+     f = tw["profile"]["faithfulness"]
+     return {"persona": name, "games": games, "decisions": tw["decisions"], "play_s": round(t1 - t0), "build_s": round(time.time() - t1),
+             "recovered": checks, "twin_top1": f["twin_top1"], "engine_top1": f["engine_top1"], "twin_top3": f["twin_top3"],
+-            "engine_top3": f["engine_top3"], "style": [x["text"] for x in tw["profile"]["style"]]}
++            "engine_top3": f["engine_top3"], "style": [x["text"] for x in tw["profile"]["style"]],
++            "curve": tw["profile"].get("learning_curve", [])}
+ 
+ 
+ if __name__ == "__main__":
+@@ -123,3 +124,5 @@
+         print(f"  move match on held-out games: Twin {r['twin_top1']}% (top-3 {r['twin_top3']}%) vs Stockfish {r['engine_top1']}% "
+               f"(top-3 {r['engine_top3']}%)")
+         print(f"  style the Twin reports: {', '.join(r['style']) or '-'}")
++        print("  learning curve (games used -> their move in the Twin's top 3): "
++              + ", ".join(f"{p['games']} -> {p['twin_top3']}%" for p in r["curve"]))
+diff -ruN a/tests/test_twin.py b/tests/test_twin.py
+--- a/tests/test_twin.py	2026-10-12 11:30:53.319234123 +0000
++++ b/tests/test_twin.py	2026-10-12 11:18:19.000000000 +0000
+@@ -38,6 +38,7 @@
+             f[ix["loss_middlegame"]] = -10 * rng.random() * 0.2
+             f[ix["trade"]] = float(rng.random() < 0.3)
+             f[ix["pawn_push"]] = float(rng.random() < 0.4)
++        rows = [twin.sparse(f) for f in rows]
+         p = twin.probabilities(true, rows)
+         data.append((rows, twin._weighted(rng, list(range(8)), p)))
+     beta, se = twin.fit(data, [0.0] * twin.NF, lam=0.5, with_se=True)
+@@ -51,6 +52,7 @@
+     ix = {n: k for k, n in enumerate(twin.FEATURES)}
+     rows_ok = [[0.0] * twin.NF for _ in range(5)]
+     rows_ok[1][ix["loss_middlegame"]] = -10.0
++    rows_ok = [twin.sparse(r) for r in rows_ok]
+     data = [(rows_ok, 0)] * 50 + [(rows_ok, 1)] * 2
+     beta = twin.fit(data, twin.prior(1500))
+     assert 0 < beta[ix["loss_middlegame"]] < 20
+@@ -100,7 +102,7 @@
+ 
+ 
+ @needs_engine
+-def test_build_play_and_review(m):
++def test_build_play_and_review(m, monkeypatch):
+     c, pid = _pro_with_player(m, "twin-b@test.com", "demo_player")
+     with c:
+         st = c.get(f"/api/twin/{pid}").json()
+@@ -116,9 +118,11 @@
+         assert set(p["accuracy"]) == {"opening", "middlegame", "endgame"} and p["confidence"] in ("low", "medium", "high")
+         assert p["faithfulness"]["decisions"] > 0 and p["faithfulness"]["twin_top3"] is not None
+         assert p["openings"]["white"] and p["openings"]["white"][0]["pct"] > 0
+-        # Building again straight away doesn't spend a build
++        # At the plan's study limit, building again doesn't spend a build
++        monkeypatch.setitem(m.PLANS["pro"], "twin_study_max", 12)
+         again = c.post(f"/api/twin/{pid}/build", json={}).json()
+-        assert again["job_id"] is None and "up to date" in again["message"]
++        assert again["job_id"] is None and "up to date" in again["message"] and "limit" in again["message"]
++        monkeypatch.setitem(m.PLANS["pro"], "twin_study_max", 600)
+         # Play: the Twin answers with legal moves and says why
+         moves = []
+         for _ in range(6):
+@@ -170,3 +174,131 @@
+         m.store.set_plan(m.store.user_by_email("twin-e@test.com")["id"], "pro")
+         assert other.get(f"/api/twin/{pid}").status_code == 404
+         assert other.post(f"/api/twin/{pid}/move", json={"moves": []}).status_code == 404
++
++
++def test_weights_pull_the_fit_toward_recent_games():
++    """Recent games (weight 1) should outweigh old ones (weight 0.1) where the player has changed."""
++    ix = {n: k for k, n in enumerate(twin.FEATURES)}
++    rows = [[0.0] * twin.NF for _ in range(2)]
++    rows[0][ix["trade"]] = 1.0
++    rows = [twin.sparse(r) for r in rows]
++    recent = [(rows, 0, 1.0)] * 80 + [(rows, 1, 1.0)] * 20  # now: trades 80% of the time
++    old = [(rows, 1, 0.1)] * 400  # years ago: never traded
++    weighted = twin.fit(recent + old, [0.0] * twin.NF, lam=0.5)
++    flat = twin.fit([(r, c_) for r, c_, _ in recent + old], [0.0] * twin.NF, lam=0.5)
++    assert weighted[ix["trade"]] > 0.2 and flat[ix["trade"]] < -1  # weighted: they trade now; unweighted: old habits win
++
++
++def test_studies_pack_compactly_and_round_trip():
++    ix = {n: k for k, n in enumerate(twin.FEATURES)}
++    row = [0.0] * twin.NF
++    row[ix["loss_endgame"]], row[ix["check"]] = -1.2345678, 1.0
++    d = {"rows": [twin.sparse(row), ()], "chosen": 0, "loss": 0.123456, "phase": "endgame", "pressure": True, "engine_top": 1,
++         "best_es": 0.61, "played_es": 0.48, "ply": 40}
++    back = twin.unpack(twin.pack([d] * 30))
++    assert len(back) == 30 and back[0]["rows"][0] == ((ix["loss_endgame"], -1.235), (ix["check"], 1.0))
++    assert back[0]["phase"] == "endgame" and back[0]["pressure"] is True and back[0]["rows"][1] == ()
++    assert len(twin.pack([d] * 30)) < 600  # compressed: thousands of games stay small
++
++
++def test_pick_unstudied_takes_newest_and_a_spread(m):
++    _, pid = _pro_with_player(m, "twin-pick@test.com", "demo_player")
++    refs = twin.pick_unstudied(m.store, pid, None, 9, depth=4)
++    with m.store._conn() as c:
++        order = [r[0] for r in c.execute("SELECT id FROM lib_games WHERE player_id = ? ORDER BY played_at DESC, id DESC", (pid,))]
++    assert refs[:6] == order[:6]  # two thirds newest
++    assert all(r in order[6:] for r in refs[6:]) and len(set(refs)) == 9  # the rest spread over older games
++    assert refs[-1] in order[-15:]  # reaching back into their history
++
++
++@needs_engine
++def test_twin_keeps_learning_without_restudying(m):
++    """A second build studies only new games, refits on everything, and reports a learning curve."""
++    c, pid = _pro_with_player(m, "twin-learn@test.com", "demo_player")
++    with c:
++        first = c.post(f"/api/twin/{pid}/build", json={}).json()
++        assert c.get(f"/api/jobs/{first['job_id']}").json()["state"] == "done"
++        st = c.get(f"/api/twin/{pid}").json()
++        assert st["study"]["studied"] == 12 and st["study"]["available"] == 40 and st["study"]["next_batch"] == 12
++        curve = st["twin"]["profile"]["learning_curve"]
++        assert curve and curve[-1]["games"] <= 12 and all(p["twin_top3"] is not None for p in curve)
++        with m.store._conn() as conn:
++            stamps = dict(conn.execute("SELECT game_ref, studied_at FROM twin_games WHERE player_id = ?", (pid,)).fetchall())
++        second = c.post(f"/api/twin/{pid}/build", json={}).json()
++        assert "studying 12 more games" in second["message"]
++        assert c.get(f"/api/jobs/{second['job_id']}").json()["state"] == "done"
++        st = c.get(f"/api/twin/{pid}").json()
++        assert st["study"]["studied"] == 24 and st["twin"]["games"] == 24
++        with m.store._conn() as conn:
++            again = dict(conn.execute("SELECT game_ref, studied_at FROM twin_games WHERE player_id = ?", (pid,)).fetchall())
++        assert all(again[r] == t for r, t in stamps.items())  # the first 12 weren't studied again
++        assert st["twin"]["profile"]["studied"] == 24 and st["twin"]["profile"]["available"] == 40
++
++
++# ---- full-history downloads ------------------------------------------------------------------------------
++def _demo_pages(n_first, n_second):
++    games = parse_pgn(DEMO, "demo_player")
++    from app.library import to_pgn
++
++    texts = [to_pgn(g) for g in games]
++    return "\n\n".join(texts[:n_first]), "\n\n".join(texts[n_first:n_first + n_second])
++
++
++def test_full_history_from_lichess_pages_through_everything(m, monkeypatch):
++    first, second = _demo_pages(15, 10)
++    calls = []
++
++    def page(handle, want, until=None, http=None):
++        calls.append((want, until))
++        return (first, 15, 1_700_000_000_000) if until is None else (second, 10, 1_600_000_000_000)
++
++    monkeypatch.setattr("app.sources.lichess_history_page", page)
++    monkeypatch.setattr("app.sync.LIBRARY_PAGE", 15)
++    monkeypatch.setattr(m, "check_account", lambda platform, handle: handle)
++    c = client(m, "full-li@test.com")
++    with c:
++        m.store.set_plan(m.store.user_by_email("full-li@test.com")["id"], "pro")
++        p = m.library.get_or_create_player("lichess", "demo_player")
++        m.library.save(m.store.user_by_email("full-li@test.com")["id"], p["id"])
++        r = c.post(f"/api/library/{p['id']}/full").json()
++        job = c.get(f"/api/jobs/{r['job_id']}").json()
++        assert job["state"] == "done", job
++        assert calls == [(15, None), (15, 1_700_000_000_000 - 1)]  # second page starts just before the oldest game
++        st = c.get(f"/api/library/{p['id']}/full").json()
++        assert st["full_at"] and st["games"] >= 25 and st["cap"] == 3000  # (other tests may share this public player)
++        again = c.post(f"/api/library/{p['id']}/full").json()
++        assert again["job_id"] is None and "this week" in again["message"]
++
++
++def test_full_history_from_chesscom_walks_every_month(m, monkeypatch):
++    first, second = _demo_pages(12, 8)
++    months = ["https://api.chess.com/pub/player/demo_player/games/2026/09", "https://api.chess.com/pub/player/demo_player/games/2026/08",
++              "https://api.chess.com/pub/player/demo_player/games/2026/07"]
++    monkeypatch.setattr("app.sources.chesscom_archives", lambda handle, http=None: list(months))
++    monkeypatch.setattr("app.sources.chesscom_month", lambda url, http=None: {months[0]: first, months[1]: second}.get(url, ""))
++    monkeypatch.setattr("app.sync.LIBRARY_MONTHS_PER_TURN", 2)
++    c = client(m, "full-cc@test.com")
++    with c:
++        uid = m.store.user_by_email("full-cc@test.com")["id"]
++        m.store.set_plan(uid, "coach")
++        p = m.library.get_or_create_player("chesscom", "demo_player")
++        m.library.save(uid, p["id"])
++        r = c.post(f"/api/library/{p['id']}/full").json()
++        job = c.get(f"/api/jobs/{r['job_id']}").json()
++        assert job["state"] == "done", job
++        assert m.library.player(p["id"])["games"] >= 20 and m.library.player(p["id"])["full_at"]
++
++
++def test_full_history_cap_and_pgn_players(m, monkeypatch):
++    first, second = _demo_pages(15, 10)
++    monkeypatch.setattr("app.sources.lichess_history_page", lambda h, want, until=None, http=None: (first, 15, 1_700_000_000_000))
++    monkeypatch.setitem(m.PLANS["pro"], "library_full_games", 15)
++    c, pgn_pid = _pro_with_player(m, "full-cap@test.com", "demo_player")
++    with c:
++        uid = m.store.user_by_email("full-cap@test.com")["id"]
++        assert c.post(f"/api/library/{pgn_pid}/full").status_code == 400
++        p = m.library.get_or_create_player("lichess", "cap_player_x")
++        m.library.save(uid, p["id"])
++        r = c.post(f"/api/library/{p['id']}/full").json()
++        assert c.get(f"/api/jobs/{r['job_id']}").json()["state"] == "done"
++        assert m.library.player(p["id"])["full_at"]  # stopped at the plan's cap after one page

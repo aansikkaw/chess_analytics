@@ -130,6 +130,13 @@ class Library:
                 c.execute("UPDATE lib_players SET games = ?, fetched_at = ? WHERE id = ?", (n, time.time(), player_id))
         return added
 
+    def finish_full(self, player_id: int, started: float) -> None:
+        """A full-history download finished: later updates fetch only games since it started."""
+        with self._conn() as c:
+            n = c.execute("SELECT COUNT(*) FROM lib_games WHERE player_id = ?", (player_id,)).fetchone()[0]
+            c.execute("UPDATE lib_players SET games = ?, full_at = ?, fetched_at = ?, requested = MAX(COALESCE(requested, 0), ?) "
+                      "WHERE id = ?", (n, time.time(), started, n, player_id))
+
     def records(self, player_id: int, limit: int | None = None) -> list[GameRecord]:
         sql = "SELECT data FROM lib_games WHERE player_id = ? ORDER BY played_at DESC, id DESC"
         args: list = [player_id]
@@ -156,7 +163,7 @@ class Library:
     def entries(self, user_id: int) -> list[dict]:
         with self._conn() as c:
             rows = [dict(r) for r in c.execute(
-                "SELECT p.id, p.platform, p.handle, p.owner_id, p.games, p.fetched_at, l.notes, l.tags, l.added_at, l.opened_at, "
+                "SELECT p.id, p.platform, p.handle, p.owner_id, p.games, p.fetched_at, p.full_at, l.notes, l.tags, l.added_at, l.opened_at, "
                 "(SELECT MAX(played_at) FROM lib_games g WHERE g.player_id = p.id) AS last_game, "
                 "(SELECT ROUND(100.0 * AVG(score)) FROM lib_games g WHERE g.player_id = p.id) AS score_pct "
                 "FROM library l JOIN lib_players p ON p.id = l.player_id WHERE l.user_id = ? "
@@ -191,6 +198,7 @@ class Library:
         c.execute("DELETE FROM lib_positions WHERE game_ref IN (SELECT id FROM lib_games WHERE player_id = ?)", (player_id,))
         c.execute("DELETE FROM lib_games WHERE player_id = ?", (player_id,))
         c.execute("DELETE FROM twins WHERE player_id = ?", (player_id,))
+        c.execute("DELETE FROM twin_games WHERE player_id = ?", (player_id,))
         c.execute("DELETE FROM lib_players WHERE id = ?", (player_id,))
 
     def delete_user(self, user_id: int) -> None:

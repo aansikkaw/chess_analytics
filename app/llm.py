@@ -249,3 +249,64 @@ def parse_tool_args(raw) -> dict:
         return out if isinstance(out, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def json_completion(backend: Backend, system: str, prompt: str, http: httpx.Client | None = None, max_tokens: int = 3000,
+                    timeout: float = 90.0) -> tuple[str, int]:
+    """One request for a JSON answer (no tools). Returns (text, tokens used). Raises LLMError on any failure.
+    Claude goes through the Messages API; everything else through /chat/completions with JSON mode."""
+    own = http is None
+    http = http or httpx.Client(timeout=timeout)
+    try:
+        if backend.kind == "anthropic":
+            body = {"model": backend.model, "max_tokens": max_tokens, "temperature": 0.2, "system": system,
+                    "messages": [{"role": "user", "content": prompt}]}
+            r = _post_json(http, "https://api.anthropic.com/v1/messages",
+                           {"x-api-key": backend.api_key or "", "anthropic-version": "2023-06-01"}, body)
+            data = r.json()
+            text = "".join(c.get("text", "") for c in data.get("content", []) if isinstance(c, dict))
+            u = data.get("usage") or {}
+            return text, int(u.get("input_tokens", 0)) + int(u.get("output_tokens", 0))
+        headers = {"Authorization": f"Bearer {backend.api_key}"} if backend.api_key else {}
+        body = {"model": backend.model, "temperature": 0.2, "max_tokens": max_tokens, "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
+        effort = request_extras(backend).get("reasoning_effort")
+        if effort:
+            body["reasoning_effort"] = effort
+        try:
+            r = _post_json(http, f"{backend.base_url}/chat/completions", headers, body)
+        except LLMError as exc:
+            if not any(k in str(exc).lower() for k in ("response_format", "json", "(400)", "(422)")):
+                raise
+            body.pop("response_format")  # a provider without JSON mode (or not with these options): ask again without it
+            r = _post_json(http, f"{backend.base_url}/chat/completions", headers, body)
+        data = r.json()
+        try:
+            text = data["choices"][0]["message"].get("content") or ""
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMError("The model returned a response I couldn't read.") from exc
+        return text, int((data.get("usage") or {}).get("total_tokens", 0))
+    finally:
+        if own:
+            http.close()
+
+
+def _post_json(http: httpx.Client, url: str, headers: dict, body: dict) -> httpx.Response:
+    try:
+        r = http.post(url, headers=headers, json=body)
+    except httpx.TimeoutException as exc:
+        raise LLMError("The model took too long to answer.") from exc
+    except httpx.HTTPError as exc:
+        raise LLMError(f"Couldn't reach the model: {exc}") from exc
+    if r.status_code == 429:
+        wait = rate_limit_wait(r)
+        if wait is not None and wait <= MAX_RATE_WAIT:
+            _sleep(wait + 0.5)
+            r = http.post(url, headers=headers, json=body)
+    if r.status_code in (401, 403):
+        raise LLMError("The API key was rejected.")
+    if r.status_code == 429:
+        raise LLMError("The provider's rate limit was hit. Try again in a minute.")
+    if r.status_code >= 400:
+        raise LLMError(f"The model provider returned an error ({r.status_code}): {r.text[:200]}")
+    return r

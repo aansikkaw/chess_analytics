@@ -38,6 +38,11 @@ Postgres with point-in-time recovery.
 | `chesscom` | Chess.com rate-limiting or blocking us | Chess.com sync paused; Lichess and PGN still work |
 | `signups` | Spam signups, or a launch spike you can't handle | "New accounts are paused for a short while." |
 | `emails` | Provider failing or sending to the wrong place | Emails are saved to `outbox/` instead of sent |
+| `twin` | Workers needed for imports; Twin builds misbehaving | Twin practice and builds paused; library and reports work |
+| `predicted` | Puzzle annotation hogging workers | No new predicted puzzles; the existing deck works |
+| `think` | "Think here" scans hogging workers | No new scans; the drill works |
+| `scanner` | Vision provider failing, or its bill spiking | Photo reading paused; typing the moves works |
+| `review` | Report cards hogging workers, or a bug in them | No new report cards; existing ones still open |
 
 ```bash
 pb switch                     # show all
@@ -100,5 +105,18 @@ you know the backups actually work before you need them.
 * Groq's free tier allows about one coach question a minute across all users; the paid tier removes that.
   Each user also has a daily AI token budget (`ai_tokens_per_day` in `app/plans.py`), so one heavy user
   can't run up the bill.
+* Opponent Library and Twins: about 6.5 KB per saved game (with the position index) and 2 KB per studied
+  game. 100 players with full histories of 3,000 games is about 2 GB. A Twin build studies about 1 game a
+  second per worker. Pause them with `pb switch twin off` if workers are needed for imports.
+* Predicted puzzles: each bank puzzle is annotated once for everyone (about 0.1 s at depth 10), so the first
+  users at a new level wait a minute while 300 puzzles are prepared. Pre-annotate with
+  `python scripts/import_puzzles.py --annotate 5000 --around 1700`. Your-own-Twin builds and "Think here"
+  scans cost about 1 second per game. Pause them with `pb switch predicted off` / `pb switch think off`.
+* Scoresheet photos call the vision model (about 2,000 tokens each, plus a short follow-up about unclear
+  moves; double that with a second reader, `VISION2_*`). If the provider fails or bills spike:
+  `pb switch scanner off`. Typing moves keeps working.
+* Game report cards take 10–20 seconds of one worker each at `REVIEW_DEPTH=14` (Free users get 10 a day).
+  The AI write-up is one model call of about 3,000 tokens. If workers fall behind: lower `REVIEW_DEPTH` to 12,
+  or `pb switch review off`. With `pb switch ai_coach off`, reviews are written by the built-in coach.
 * Load test before a launch: `deploy/loadtest/locustfile.py` (instructions inside). Watch the status page's
   queue wait, p95 latency in the access log, and the error rate.

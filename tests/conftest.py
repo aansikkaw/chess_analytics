@@ -19,6 +19,14 @@ os.environ["SIGNUPS_PER_HOUR"] = "100000"  # the suite signs up many users from 
 os.environ["JOB_MODE"] = "inline"
 os.environ.setdefault("TWIN_GAMES", "12")  # Opponent Twin builds study fewer games, at low depth, in tests
 os.environ.setdefault("TWIN_DEPTH", "4")  # jobs run to completion inside the request, so tests see results at once
+os.environ.setdefault("BANK_DEPTH", "4")  # predicted puzzles: shallow annotation of a small pool
+os.environ.setdefault("PREDICT_POOL", "24")
+os.environ.setdefault("SELF_TWIN_MIN_GAMES", "2")  # tests import 3 demo games; your Twin needs 10 in real use
+os.environ.setdefault("THINK_DEPTH", "4")
+os.environ.setdefault("REVIEW_DEPTH", "6")  # game report cards: shallow in tests
+for _k in ("VISION_PROVIDER", "VISION_MODEL", "VISION_BASE_URL", "VISION_API_KEY", "VISION2_MODEL", "VISION2_BASE_URL", "VISION2_API_KEY",
+           "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
+    os.environ.pop(_k, None)  # photo reading is mocked in tests, never a real model
 os.environ.pop("SENTRY_DSN", None)
 # Never send real email from the test suite, even inside a codespace that has email secrets set.
 for _k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_PORT", "SMTP_SECURITY", "SMTP_FROM", "EMAIL_FROM",

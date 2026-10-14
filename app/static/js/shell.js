@@ -6,6 +6,8 @@ import * as train from "./views/train.js";
 import * as prepare from "./views/prepare.js";
 import * as coach from "./views/coach.js";
 import * as students from "./views/students.js";
+import * as scan from "./views/scan.js";
+import * as report from "./views/report.js";
 import { renderPlans, bindCurrency } from "./plans.js";
 import { openSupport } from "./support.js";
 
@@ -15,6 +17,8 @@ const AREAS = {
   prepare: { title: "Prepare", view: prepare },
   coach: { title: "Coach", view: coach },
   students: { title: "Students", view: students },
+  scan: { title: "Scan a scoresheet", view: scan },
+  report: { title: "Game report", view: report },
   plans: { title: "Plans", view: { render: renderPlansPage } },
 };
 let signOutCb = null;
@@ -83,8 +87,8 @@ export function route() {
   const main = $("#view");
   document.title = `${AREAS[area].title} · Plateau Breaker`;
   const acct = account();
-  // Pages that don't need your own chess account: plans, the coach dashboard, scouting and the Opponent Library.
-  const free = area === "plans" || area === "students" || (area === "prepare" && (sub === "scout" || sub === "library"));
+  // Pages that don't need your own chess account: plans, the coach dashboard, the scanner, scouting and the Opponent Library.
+  const free = area === "plans" || area === "students" || area === "scan" || area === "report" || (area === "prepare" && (sub === "scout" || sub === "library"));
   if (!free && !acct) { renderOnboarding(main); return; }
   if (!free && !acct.games) { renderWaiting(main, acct); return; }
   AREAS[area].view.render(main, sub);
@@ -188,7 +192,8 @@ function renderOnboarding(main) {
   el("div", { class: "grid-2" }, el("div", { class: "sheet" }, linkForm()),
     el("div", { class: "stack muted small" }, el("h3", { text: "Which games count?" }),
       el("p", { text: "Rated blitz, rapid and classical games by default; you can add bullet. The newest games come first, and your dashboard fills in after the first 20." }),
-      el("p", { text: "Over-the-board games: export them from ChessBase as a PGN file and link a ChessBase / PGN account with your name as it appears in the file." }))));
+      el("p", { text: "Over-the-board games: export them from ChessBase as a PGN file and link a ChessBase / PGN account with your name as it appears in the file." }),
+      el("p", {}, "Only paper scoresheets? ", el("a", { href: "#/scan", text: "Scan them" }), ": a photo or the typed moves, in any language."))));
 }
 
 function renderWaiting(main, a) {

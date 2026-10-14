@@ -48,6 +48,8 @@ function overview(body, a, p) {
     ["Type", (g) => g.time_class || "–"],
     ["Accuracy", (g) => `${g.accuracy}%`, "num"],
     ["Opening", (g) => g.opening],
+    ["", (g) => el("a", { class: "small", href: `#/report/${a.id}/${encodeURIComponent(g.game_id)}`, text: "Report card",
+      onclick: (e) => e.stopPropagation() })],
   ], p.recent_games, { onRow: (g) => openGame(g.game_id) });
   body.replaceChildren(
     el("div", { class: "grid-2" },

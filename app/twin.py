@@ -47,9 +47,9 @@ import chess.engine
 
 from .analysis import PIECE_VALUE, _time_pressure, classify, game_phase, move_accuracy, win_percent
 from .games import GameRecord
-from .library import position_key
+from .library import position_key, record_from_json
 
-VERSION = 1
+VERSION = 2  # bump when features change: older studies and Twins are then rebuilt
 MIN_GAMES = 10
 FEATURES = ["loss_opening", "loss_middlegame", "loss_endgame", "loss_pressure", "best", "top3", "capture", "trade", "check",
             "castle", "pawn_push", "forward", "king_hunt", "queen_early", "same_piece", "king_walk", "recapture", "escape",
@@ -171,6 +171,22 @@ def decision_rows(board: chess.Board, cands: list[tuple[str, int]], pressure: bo
     return ucis, rows, losses
 
 
+_PAIRS: dict[tuple[int, float], tuple[int, float]] = {}
+
+
+def sparse(row: list[float]) -> tuple:
+    """A feature row as ((index, value), ...) for its non-zero features. Values are rounded and the pairs shared,
+    so tens of thousands of stored decisions fit in a few tens of megabytes."""
+    out = []
+    for k, v in enumerate(row):
+        if v:
+            v = round(v, 3)
+            if v:
+                key = (k, v)
+                out.append(_PAIRS.setdefault(key, key))
+    return tuple(out)
+
+
 # ---- the choice model --------------------------------------------------------------------------------
 def prior(rating: float | None) -> list[float]:
     """Sensible weights before seeing any games: stronger players lose less per move."""
@@ -183,33 +199,32 @@ def prior(rating: float | None) -> list[float]:
     return b
 
 
-def probabilities(beta: list[float], rows: list[list[float]], loss_scale: float = 1.0) -> list[float]:
-    u = []
-    for f in rows:
-        s = 0.0
-        for k in range(NF):
-            w = beta[k] * (loss_scale if k in LOSS else 1.0)
-            s += w * f[k]
-        u.append(s)
+def probabilities(beta: list[float], rows, loss_scale: float = 1.0) -> list[float]:
+    """Choice probabilities for sparse feature rows (see sparse())."""
+    w = [beta[k] * (loss_scale if k in LOSS else 1.0) for k in range(NF)]
+    u = [sum(w[k] * v for k, v in row) for row in rows]
     m = max(u)
     ex = [math.exp(x - m) for x in u]
     z = sum(ex)
     return [x / z for x in ex]
 
 
-def fit(decisions: list[tuple[list[list[float]], int]], beta0: list[float], lam: float = 2.0, iters: int = 15,
-        with_se: bool = False):
-    """Maximum-likelihood conditional logit with a Gaussian prior around beta0 (Newton's method).
+def fit(decisions: list[tuple], beta0: list[float], lam: float = 2.0, iters: int = 15, with_se: bool = False):
+    """Maximum-likelihood conditional logit with a Gaussian prior around beta0 (Newton's method with a line search).
 
-    Uses H = sum_c p_c f_c f_c^T - m m^T with sparse feature vectors, so a thousand decisions fit in about a second.
+    `decisions` are (sparse rows, chosen index) or (sparse rows, chosen index, weight): weights let recent games
+    count more. They are normalised to average 1, so the prior keeps the same pull. Uses H = sum_c p_c f_c f_c^T
+    - m m^T on sparse rows, so a thousand decisions fit in well under a second.
     """
-    sparse = [([[(k, v) for k, v in enumerate(f) if v] for f in rows], chosen) for rows, chosen in decisions]
+    ws = [d[2] if len(d) > 2 else 1.0 for d in decisions]
+    mean_w = (sum(ws) / len(ws)) if ws else 1.0
+    sparse = [(d[0], d[1], w / mean_w) for d, w in zip(decisions, ws, strict=True)]
     beta = list(beta0)
     h: list[list[float]] = []
     for _ in range(iters):
         g = [-lam * (beta[k] - beta0[k]) for k in range(NF)]
         h = [[(lam if i == j else 0.0) for j in range(NF)] for i in range(NF)]  # negative Hessian
-        for rows, chosen in sparse:
+        for rows, chosen, wt in sparse:
             u = [sum(beta[k] * v for k, v in nz) for nz in rows]
             mx = max(u)
             ex = [math.exp(x - mx) for x in u]
@@ -221,21 +236,23 @@ def fit(decisions: list[tuple[list[list[float]], int]], beta0: list[float], lam:
                     continue
                 for k, v in nz:
                     mean[k] += pc * v
+                pw = pc * wt
                 for i, vi in nz:
                     hi = h[i]
-                    pvi = pc * vi
+                    pvi = pw * vi
                     for j, vj in nz:
                         hi[j] += pvi * vj
             for k, v in rows[chosen]:
-                g[k] += v
+                g[k] += wt * v
             for k in range(NF):
                 mk = mean[k]
                 if mk:
-                    g[k] -= mk
+                    g[k] -= wt * mk
                     hk = h[k]
+                    wmk = wt * mk
                     for j in range(NF):
                         if mean[j]:
-                            hk[j] -= mk * mean[j]
+                            hk[j] -= wmk * mean[j]
         step = _solve(h, g)
         # Backtracking line search: a full Newton step can overshoot when a few moves lose a lot.
         current = _objective(sparse, beta, beta0, lam)
@@ -263,10 +280,10 @@ def fit(decisions: list[tuple[list[list[float]], int]], beta0: list[float], lam:
 
 def _objective(sparse, beta: list[float], beta0: list[float], lam: float) -> float:
     total = -0.5 * lam * sum((beta[k] - beta0[k]) ** 2 for k in range(NF))
-    for rows, chosen in sparse:
+    for rows, chosen, wt in sparse:
         u = [sum(beta[k] * v for k, v in nz) for nz in rows]
         mx = max(u)
-        total += u[chosen] - mx - math.log(sum(math.exp(x - mx) for x in u))
+        total += wt * (u[chosen] - mx - math.log(sum(math.exp(x - mx) for x in u)))
     return total
 
 
@@ -377,7 +394,7 @@ def collect_decisions(records: list[GameRecord], engine, limit: chess.engine.Lim
                     if uci in ucis:
                         chosen = ucis.index(uci)
                         best_cp = max(cp for _, cp in cands)
-                        out.append({"game": gi, "rows": rows, "chosen": chosen, "loss": losses[chosen], "phase": game_phase(board),
+                        out.append({"game": gi, "rows": [sparse(r) for r in rows], "chosen": chosen, "loss": losses[chosen], "phase": game_phase(board),
                                     "pressure": pressure, "engine_top": ucis.index(max(cands, key=lambda x: x[1])[0]),
                                     "best_es": es(best_cp), "played_es": es(dict(cands)[uci]), "ply": ply})
             if mover_is_them:
@@ -403,7 +420,7 @@ def evaluate(beta: list[float], test: list[dict]) -> dict:
         t1 += order[0] == d["chosen"]
         t3 += d["chosen"] in order[:3]
         e1 += d["engine_top"] == d["chosen"]
-        e3 += d["rows"][d["chosen"]][top3] == 1.0
+        e3 += any(k == top3 for k, _ in d["rows"][d["chosen"]])
     n = len(test)
     return {"twin_top1": round(100 * t1 / n), "engine_top1": round(100 * e1 / n), "twin_top3": round(100 * t3 / n),
             "engine_top3": round(100 * e3 / n), "decisions": n}
@@ -427,42 +444,189 @@ def book_coverage(store, player_id: int, test_records: list[GameRecord], classes
     return round(100 * hits / total) if total else None
 
 
-def build(store, library, player_id: int, classes: list[str] | None, engine, *, max_games: int = 40, depth: int = 9,
-          seed: int = 7, progress=None) -> dict:
-    """Fit a Twin for this player and save it. Returns the saved twin."""
+# ---- studying games (each game once, ever) -----------------------------------------------------------------
+# A player's history can run to thousands of games, and the engine is the expensive part (about a second per
+# game). So every game is studied once and the result is kept (table twin_games). Each build studies the next
+# batch, and a rebuild only fits the model again, which takes seconds.
+PHASE_CODE = {"opening": 0, "middlegame": 1, "endgame": 2}
+PHASE_NAME = {v: k for k, v in PHASE_CODE.items()}
+MODEL_HALF_LIFE_DAYS = 730  # in the model, a game two years older counts half as much (players change)
+MAX_FIT_DECISIONS = 24_000  # the model is fitted on at most this many of the most recent decisions
+STUDY_CHUNK = 10  # games per job turn, so a long study shares the workers fairly
+
+
+def pack(decisions: list[dict]) -> bytes:
+    import json
+    import zlib
+
+    rows = [[[list(p) for p in r] for r in d["rows"]] for d in decisions]
+    meta = [[d["chosen"], round(d["loss"], 4), PHASE_CODE[d["phase"]], int(d["pressure"]), d["engine_top"],
+             round(d["best_es"], 4), round(d["played_es"], 4), d["ply"]] for d in decisions]
+    return zlib.compress(json.dumps([rows, meta], separators=(",", ":")).encode(), 6)
+
+
+def unpack(blob: bytes) -> list[dict]:
+    import json
+    import zlib
+
+    rows, meta = json.loads(zlib.decompress(blob))
+    out = []
+    for r, m in zip(rows, meta, strict=True):
+        srows = []
+        for row in r:
+            pairs = []
+            for k, v in row:
+                key = (k, v)
+                pairs.append(_PAIRS.setdefault(key, key))
+            srows.append(tuple(pairs))
+        out.append({"rows": srows, "chosen": m[0], "loss": m[1], "phase": PHASE_NAME[m[2]], "pressure": bool(m[3]),
+                    "engine_top": m[4], "best_es": m[5], "played_es": m[6], "ply": m[7]})
+    return out
+
+
+def _tc_sql(classes) -> tuple[str, list]:
     wanted = [c for c in (classes or []) if c in TIME_CLASSES]
-    records = library.records(player_id)
-    if wanted:
-        records = [r for r in records if r.time_class in wanted]
-    records = records[:max_games]
-    if len(records) < MIN_GAMES:
-        raise ValueError(f"The Twin needs at least {MIN_GAMES} games; there are {len(records)} for these time controls.")
-    rng = random.Random(seed)
+    if wanted and len(wanted) < len(TIME_CLASSES):
+        return f" AND g.time_class IN ({','.join('?' * len(wanted))})", wanted
+    return "", []
+
+
+def study_counts(store, player_id: int, classes, depth: int) -> tuple[int, int]:
+    """(games studied, games available) for this player and these time controls."""
+    extra, args = _tc_sql(classes)
+    with store._conn() as c:
+        available = c.execute(f"SELECT COUNT(*) FROM lib_games g WHERE g.player_id = ?{extra}", [player_id, *args]).fetchone()[0]
+        studied = c.execute(f"SELECT COUNT(*) FROM twin_games t JOIN lib_games g ON g.id = t.game_ref WHERE t.player_id = ? "
+                            f"AND t.version = ? AND t.depth = ?{extra}", [player_id, VERSION, depth, *args]).fetchone()[0]
+    return studied, available
+
+
+def pick_unstudied(store, player_id: int, classes, budget: int, depth: int) -> list[int]:
+    """Which games to study next: two thirds the newest not yet studied, one third spread across the rest of
+    their history (so even the first batch sees how they played over the years)."""
+    if budget <= 0:
+        return []
+    extra, args = _tc_sql(classes)
+    with store._conn() as c:
+        rows = [r[0] for r in c.execute(f"SELECT g.id FROM lib_games g WHERE g.player_id = ?{extra} "
+                                        "ORDER BY g.played_at DESC, g.id DESC", [player_id, *args])]
+        done = {r[0] for r in c.execute("SELECT game_ref FROM twin_games WHERE player_id = ? AND version = ? AND depth = ?",
+                                        (player_id, VERSION, depth))}
+    todo = [r for r in rows if r not in done]
+    newest = todo[: max(1, (2 * budget) // 3)]
+    rest = todo[len(newest):]
+    k = budget - len(newest)
+    step = len(rest) / k if k > 0 and len(rest) > k else 1.0
+    spread = [rest[int(i * step)] for i in range(min(k, len(rest)))]
+    return newest + spread
+
+
+def study_games(store, library, player_id: int, game_refs: list[int], engine, depth: int, rng: random.Random,
+                on_game=None) -> int:
+    """Study these games (each once, ever) and keep the results. Returns how many decisions were recorded."""
     limit = chess.engine.Limit(depth=depth, time=0.5)
-    decisions = collect_decisions(records, engine, limit, rng,
-                                  progress=(lambda i, n: progress(stage="Studying their decisions", done=i, total=n)) if progress else None)
-    if len(decisions) < 30:
+    n = 0
+    for i, ref in enumerate(game_refs, 1):
+        found = library.game(ref)
+        if found:
+            decisions = collect_decisions([found[1]], engine, limit, rng)
+            with store._conn() as c:
+                c.execute("INSERT OR REPLACE INTO twin_games (game_ref, player_id, version, depth, n, data, studied_at) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?)", (ref, player_id, VERSION, depth, len(decisions), pack(decisions), time.time()))
+            n += len(decisions)
+        if on_game:
+            on_game(i)
+    return n
+
+
+def _recency(played_at: str, newest: dt.date) -> float:
+    try:
+        d = dt.date(*map(int, played_at[:10].split(".")))
+    except (ValueError, TypeError):
+        return 0.5
+    return 0.5 ** (max(0, (newest - d).days) / MODEL_HALF_LIFE_DAYS)
+
+
+def fit_twin(store, library, player_id: int, classes, depth: int, *, seed: int = 7, progress=None) -> dict:
+    """Fit the Twin on everything studied so far (most recent first, weighted by recency) and save it.
+    Also measures faithfulness on held-out games, and a learning curve: faithfulness as more games are used."""
+    wanted = [c for c in (classes or []) if c in TIME_CLASSES]
+    extra, args = _tc_sql(wanted)
+    with store._conn() as c:
+        rows = c.execute(f"SELECT t.game_ref, t.data, g.played_at, g.game_id, g.data AS rec FROM twin_games t JOIN lib_games g "
+                         f"ON g.id = t.game_ref WHERE t.player_id = ? AND t.version = ? AND t.depth = ?{extra} "
+                         "ORDER BY g.played_at DESC, g.id DESC", [player_id, VERSION, depth, *args]).fetchall()
+    games, total = [], 0
+    for r in rows:
+        decs = unpack(r["data"])
+        if not decs:
+            continue
+        games.append({"ref": r["game_ref"], "played_at": r["played_at"], "game_id": r["game_id"], "decisions": decs, "rec": r["rec"]})
+        total += len(decs)
+        if total >= MAX_FIT_DECISIONS:
+            break
+    if len(games) < MIN_GAMES:
+        raise ValueError(f"The Twin needs at least {MIN_GAMES} studied games; there are {len(games)}.")
+    if total < 30:
         raise ValueError("Not enough of their own moves to learn from (fewer than 30). Add more games.")
     if progress:
         progress(stage="Fitting their decision model")
+    try:
+        newest = dt.date(*map(int, games[0]["played_at"][:10].split(".")))
+    except (ValueError, TypeError):
+        newest = dt.date.today()
+    for i, g in enumerate(games):
+        g["weight"] = _recency(g["played_at"], newest)
+        for d in g["decisions"]:
+            d["game"] = i
+    records = [record_from_json(g["rec"]) for g in games[:300]]  # rating, castling and the book check need the games
     ratings = sorted(r.player_rating for r in records if r.player_rating)
     rating = ratings[len(ratings) // 2] if ratings else None
     beta0 = prior(rating)
-    # Faithfulness: fit on 80% of games, test on the other 20%.
-    test_games = {i for i in range(len(records)) if i % 5 == 4}
-    train = [(d["rows"], d["chosen"]) for d in decisions if d["game"] not in test_games]
-    test = [d for d in decisions if d["game"] in test_games]
-    beta_train = fit(train, beta0)
+    # Faithfulness on held-out games (every fifth game), and the learning curve on the same test set.
+    test_idx = {i for i in range(len(games)) if i % 5 == 4}
+    test = [d for i in sorted(test_idx) for d in games[i]["decisions"]]
+    train_games = [i for i in range(len(games)) if i not in test_idx]
+    rng = random.Random(seed)
+    order = train_games[:]
+    rng.shuffle(order)
+    sizes = [n for n in (10, 25, 50, 100, 200, 400, 800) if n < len(order)] + [len(order)]
+    curve = []
+    beta_train = beta0
+    for n in sizes:
+        subset = order[:n]
+        data = [(d["rows"], d["chosen"], games[i]["weight"]) for i in subset for d in games[i]["decisions"]]
+        beta_n = fit(data, beta0)
+        ev = evaluate(beta_n, test)
+        curve.append({"games": n, "twin_top3": ev["twin_top3"], "twin_top1": ev["twin_top1"]})
+        beta_train = beta_n
     faith = evaluate(beta_train, test)
-    held_out_ids = {records[i].game_id for i in test_games}
-    faith["book_top1"] = book_coverage(store, player_id, [records[i] for i in sorted(test_games)], wanted, held_out_ids)
-    beta, se = fit([(d["rows"], d["chosen"]) for d in decisions], beta0, with_se=True)
+    held_out = [records[i] for i in sorted(test_idx) if i < len(records)][:40]
+    faith["book_top1"] = book_coverage(store, player_id, held_out, wanted, {g.game_id for g in held_out})
+    all_data = [(d["rows"], d["chosen"], g["weight"]) for g in games for d in g["decisions"]]
+    beta, se = fit(all_data, beta0, with_se=True)
+    decisions = [d for g in games for d in g["decisions"]]
     prof = profile(decisions, beta, beta0, records, store, player_id, wanted, se)
-    prof["faithfulness"] = faith
-    prof["rating"] = rating
-    twin = save(store, player_id, tc_key(wanted), beta, prof, len(records), len(decisions),
-                newest=max((r.played_at for r in records), default=""))
-    return twin
+    studied, available = study_counts(store, player_id, wanted, depth)
+    prof.update(faithfulness=faith, rating=rating, learning_curve=curve, studied=studied, available=available,
+                used_games=len(games), oldest_game=games[-1]["played_at"], half_life_days=MODEL_HALF_LIFE_DAYS)
+    return save(store, player_id, tc_key(wanted), beta, prof, len(games), len(decisions),
+                newest=max((g["played_at"] for g in games), default=""))
+
+
+def build(store, library, player_id: int, classes: list[str] | None, engine, *, max_games: int = 40, depth: int = 9,
+          seed: int = 7, progress=None) -> dict:
+    """Study up to `max_games` more of their games, then fit and save the Twin (all in one go: scripts and tests;
+    the app does the same in chunks through the job queue)."""
+    wanted = [c for c in (classes or []) if c in TIME_CLASSES]
+    _, available = study_counts(store, player_id, wanted, depth)
+    if available < MIN_GAMES:
+        raise ValueError(f"The Twin needs at least {MIN_GAMES} games; there are {available} for these time controls.")
+    refs = pick_unstudied(store, player_id, wanted, max_games, depth)
+    rng = random.Random(seed)
+    study_games(store, library, player_id, refs, engine, depth, rng,
+                on_game=(lambda i: progress(stage="Studying their decisions", done=i, total=len(refs))) if progress else None)
+    return fit_twin(store, library, player_id, wanted, depth, seed=seed, progress=progress)
 
 
 def profile(decisions: list[dict], beta: list[float], beta0: list[float], records: list[GameRecord], store, player_id: int,
@@ -578,7 +742,7 @@ def choose(store, twin: dict, board: chess.Board, engine, *, classes=None, mode:
         mv = rng.choice(legal)
         return {"uci": mv.uci(), "san": board.san(mv), "source": "model", "why": "", "alternatives": []}
     ucis, rows, losses = decision_rows(board, cands, False, prev_to, opp_to)
-    p = probabilities(twin["params"], rows, GOOD_DAY if mode == "good_day" else 1.0)
+    p = probabilities(twin["params"], [sparse(r) for r in rows], GOOD_DAY if mode == "good_day" else 1.0)
     i = _weighted(rng, list(range(len(ucis))), p)
     mv = chess.Move.from_uci(ucis[i])
     best = board.san(chess.Move.from_uci(max(cands, key=lambda x: x[1])[0]))

@@ -24,6 +24,12 @@ PLANS: dict[str, dict] = {
         "ai_tokens_per_day": 80_000,  # cost cap: about 10-15 AI answers; after that the built-in coach answers
         "scouts_per_day": 0,
         "library_players": 0,
+        "predicted_per_day": 8,  # new Twin-predicted puzzles a day
+        "self_twin_games": 60,  # games your own Twin may study
+        "think_games": 100,  # games the "Think here" trainer scans
+        "scans_per_day": 3,  # scoresheet photos read by the vision model (typing moves is unlimited)
+        "reviews_per_day": 10,  # full game reviews (Stockfish, both sides)
+        "ai_reviews_per_day": 3,  # of those, written up by the AI coach (the built-in coach writes the rest)
         "features": {"dna", "puzzles", "plan", "coach"},
         "blurb": "Rating DNA, puzzles from your own mistakes, a weekly plan, ChessBase/PGN upload and 15 coach questions a day.",
     },
@@ -36,7 +42,15 @@ PLANS: dict[str, dict] = {
         "ai_tokens_per_day": 600_000,
         "scouts_per_day": 25,  # downloads: opening a player already in your library is free
         "library_players": 150,  # players saved in the Opponent Library
-        "twin_builds_per_day": 10,  # Opponent Twin builds (each studies ~40 games with the engine)
+        "twin_builds_per_day": 10,  # Opponent Twin builds ("Keep learning" counts as one)
+        "twin_study_max": 600,  # games a Twin can study in total, across builds
+        "library_full_games": 3000,  # games kept per library player by "Download full history"
+        "predicted_per_day": 40,
+        "self_twin_games": 300,
+        "think_games": 500,
+        "scans_per_day": 30,
+        "reviews_per_day": 100,
+        "ai_reviews_per_day": 30,
         "features": {"dna", "puzzles", "plan", "coach", "scout", "repertoire", "progress", "autosync", "prep"},
         "blurb": "Everything in Free, plus Prep Check for your ChessBase repertoire, Opponent Scout, Repertoire Leaks, "
                  "Progress tracking and Auto-sync.",
@@ -51,6 +65,13 @@ PLANS["coach"] = {
     "ai_tokens_per_day": 1_200_000,
     "library_players": 500,
     "twin_builds_per_day": 30,
+    "twin_study_max": 2000,
+    "library_full_games": 10_000,
+    "predicted_per_day": 60,
+    "self_twin_games": 500,
+    "scans_per_day": 100,
+    "reviews_per_day": 200,
+    "ai_reviews_per_day": 60,
     "features": PLANS["pro"]["features"] | {"students"},
     "blurb": "Everything in Pro, plus a dashboard for up to 20 students: every student's Rating DNA, weak spots and homework.",
 }
@@ -70,12 +91,15 @@ EVENT_PASS_DAYS = 10
 OFFERS: list[dict] = [
     {"id": "free", "name": "Free", "grants": "free", "tagline": "See what's costing you rating.",
      "price": {"inr": "₹0", "usd": "$0", "period": ""},
-     "points": ["Rating DNA across 7 skills", "Puzzles from your own mistakes", "A 7-day study plan",
+     "points": ["Rating DNA across 7 skills", "Puzzles from your own mistakes", "8 Twin-predicted puzzles a day",
+                "The \"Think here\" trainer", "Scoresheet scanner (3 photos a day, typing unlimited)",
+                "Game report cards: 10 a day, 3 written by the AI coach", "A 7-day study plan",
                 "Up to 200 games per sync, 2 linked accounts", "15 coach questions a day"]},
     {"id": "pro", "name": "Pro", "grants": "pro", "tagline": "Prepare for real opponents and track your progress.", "featured": True,
      "price": {"inr": os.getenv("PRO_PRICE_INR", "₹399"), "usd": os.getenv("PRO_PRICE_USD", "$6"), "period": "month",
                "annual_inr": os.getenv("PRO_ANNUAL_INR", "₹2,999"), "annual_usd": os.getenv("PRO_ANNUAL_USD", "$49")},
-     "points": ["Everything in Free", "Prep Check: your ChessBase repertoire vs your games", "Opponent Scout and Library with position search",
+     "points": ["Everything in Free", "40 Twin-predicted puzzles a day, from a Twin of you trained on 300 games",
+                "Prep Check: your ChessBase repertoire vs your games", "Opponent Scout and Library with position search",
                 "Opponent Twins: practise against a bot that plays like them",
                 "Repertoire Leaks and recurring mistakes", "Progress tracking and Auto-sync", "Up to 500 games per sync, 200 coach questions a day"]},
     {"id": "event", "name": "Event Pass", "grants": "pro", "tagline": f"Pro for {EVENT_PASS_DAYS} days, for one tournament.",

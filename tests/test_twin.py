@@ -38,6 +38,7 @@ def test_fit_recovers_known_weights():
             f[ix["loss_middlegame"]] = -10 * rng.random() * 0.2
             f[ix["trade"]] = float(rng.random() < 0.3)
             f[ix["pawn_push"]] = float(rng.random() < 0.4)
+        rows = [twin.sparse(f) for f in rows]
         p = twin.probabilities(true, rows)
         data.append((rows, twin._weighted(rng, list(range(8)), p)))
     beta, se = twin.fit(data, [0.0] * twin.NF, lam=0.5, with_se=True)
@@ -51,6 +52,7 @@ def test_fit_is_stable_with_extreme_losses():
     ix = {n: k for k, n in enumerate(twin.FEATURES)}
     rows_ok = [[0.0] * twin.NF for _ in range(5)]
     rows_ok[1][ix["loss_middlegame"]] = -10.0
+    rows_ok = [twin.sparse(r) for r in rows_ok]
     data = [(rows_ok, 0)] * 50 + [(rows_ok, 1)] * 2
     beta = twin.fit(data, twin.prior(1500))
     assert 0 < beta[ix["loss_middlegame"]] < 20
@@ -100,7 +102,7 @@ def test_twin_needs_a_library_player_and_pro(m):
 
 
 @needs_engine
-def test_build_play_and_review(m):
+def test_build_play_and_review(m, monkeypatch):
     c, pid = _pro_with_player(m, "twin-b@test.com", "demo_player")
     with c:
         st = c.get(f"/api/twin/{pid}").json()
@@ -116,9 +118,11 @@ def test_build_play_and_review(m):
         assert set(p["accuracy"]) == {"opening", "middlegame", "endgame"} and p["confidence"] in ("low", "medium", "high")
         assert p["faithfulness"]["decisions"] > 0 and p["faithfulness"]["twin_top3"] is not None
         assert p["openings"]["white"] and p["openings"]["white"][0]["pct"] > 0
-        # Building again straight away doesn't spend a build
+        # At the plan's study limit, building again doesn't spend a build
+        monkeypatch.setitem(m.PLANS["pro"], "twin_study_max", 12)
         again = c.post(f"/api/twin/{pid}/build", json={}).json()
-        assert again["job_id"] is None and "up to date" in again["message"]
+        assert again["job_id"] is None and "up to date" in again["message"] and "limit" in again["message"]
+        monkeypatch.setitem(m.PLANS["pro"], "twin_study_max", 600)
         # Play: the Twin answers with legal moves and says why
         moves = []
         for _ in range(6):
@@ -170,3 +174,131 @@ def test_twin_is_private_for_uploaded_players(m):
         m.store.set_plan(m.store.user_by_email("twin-e@test.com")["id"], "pro")
         assert other.get(f"/api/twin/{pid}").status_code == 404
         assert other.post(f"/api/twin/{pid}/move", json={"moves": []}).status_code == 404
+
+
+def test_weights_pull_the_fit_toward_recent_games():
+    """Recent games (weight 1) should outweigh old ones (weight 0.1) where the player has changed."""
+    ix = {n: k for k, n in enumerate(twin.FEATURES)}
+    rows = [[0.0] * twin.NF for _ in range(2)]
+    rows[0][ix["trade"]] = 1.0
+    rows = [twin.sparse(r) for r in rows]
+    recent = [(rows, 0, 1.0)] * 80 + [(rows, 1, 1.0)] * 20  # now: trades 80% of the time
+    old = [(rows, 1, 0.1)] * 400  # years ago: never traded
+    weighted = twin.fit(recent + old, [0.0] * twin.NF, lam=0.5)
+    flat = twin.fit([(r, c_) for r, c_, _ in recent + old], [0.0] * twin.NF, lam=0.5)
+    assert weighted[ix["trade"]] > 0.2 and flat[ix["trade"]] < -1  # weighted: they trade now; unweighted: old habits win
+
+
+def test_studies_pack_compactly_and_round_trip():
+    ix = {n: k for k, n in enumerate(twin.FEATURES)}
+    row = [0.0] * twin.NF
+    row[ix["loss_endgame"]], row[ix["check"]] = -1.2345678, 1.0
+    d = {"rows": [twin.sparse(row), ()], "chosen": 0, "loss": 0.123456, "phase": "endgame", "pressure": True, "engine_top": 1,
+         "best_es": 0.61, "played_es": 0.48, "ply": 40}
+    back = twin.unpack(twin.pack([d] * 30))
+    assert len(back) == 30 and back[0]["rows"][0] == ((ix["loss_endgame"], -1.235), (ix["check"], 1.0))
+    assert back[0]["phase"] == "endgame" and back[0]["pressure"] is True and back[0]["rows"][1] == ()
+    assert len(twin.pack([d] * 30)) < 600  # compressed: thousands of games stay small
+
+
+def test_pick_unstudied_takes_newest_and_a_spread(m):
+    _, pid = _pro_with_player(m, "twin-pick@test.com", "demo_player")
+    refs = twin.pick_unstudied(m.store, pid, None, 9, depth=4)
+    with m.store._conn() as c:
+        order = [r[0] for r in c.execute("SELECT id FROM lib_games WHERE player_id = ? ORDER BY played_at DESC, id DESC", (pid,))]
+    assert refs[:6] == order[:6]  # two thirds newest
+    assert all(r in order[6:] for r in refs[6:]) and len(set(refs)) == 9  # the rest spread over older games
+    assert refs[-1] in order[-15:]  # reaching back into their history
+
+
+@needs_engine
+def test_twin_keeps_learning_without_restudying(m):
+    """A second build studies only new games, refits on everything, and reports a learning curve."""
+    c, pid = _pro_with_player(m, "twin-learn@test.com", "demo_player")
+    with c:
+        first = c.post(f"/api/twin/{pid}/build", json={}).json()
+        assert c.get(f"/api/jobs/{first['job_id']}").json()["state"] == "done"
+        st = c.get(f"/api/twin/{pid}").json()
+        assert st["study"]["studied"] == 12 and st["study"]["available"] == 40 and st["study"]["next_batch"] == 12
+        curve = st["twin"]["profile"]["learning_curve"]
+        assert curve and curve[-1]["games"] <= 12 and all(p["twin_top3"] is not None for p in curve)
+        with m.store._conn() as conn:
+            stamps = dict(conn.execute("SELECT game_ref, studied_at FROM twin_games WHERE player_id = ?", (pid,)).fetchall())
+        second = c.post(f"/api/twin/{pid}/build", json={}).json()
+        assert "studying 12 more games" in second["message"]
+        assert c.get(f"/api/jobs/{second['job_id']}").json()["state"] == "done"
+        st = c.get(f"/api/twin/{pid}").json()
+        assert st["study"]["studied"] == 24 and st["twin"]["games"] == 24
+        with m.store._conn() as conn:
+            again = dict(conn.execute("SELECT game_ref, studied_at FROM twin_games WHERE player_id = ?", (pid,)).fetchall())
+        assert all(again[r] == t for r, t in stamps.items())  # the first 12 weren't studied again
+        assert st["twin"]["profile"]["studied"] == 24 and st["twin"]["profile"]["available"] == 40
+
+
+# ---- full-history downloads ------------------------------------------------------------------------------
+def _demo_pages(n_first, n_second):
+    games = parse_pgn(DEMO, "demo_player")
+    from app.library import to_pgn
+
+    texts = [to_pgn(g) for g in games]
+    return "\n\n".join(texts[:n_first]), "\n\n".join(texts[n_first:n_first + n_second])
+
+
+def test_full_history_from_lichess_pages_through_everything(m, monkeypatch):
+    first, second = _demo_pages(15, 10)
+    calls = []
+
+    def page(handle, want, until=None, http=None):
+        calls.append((want, until))
+        return (first, 15, 1_700_000_000_000) if until is None else (second, 10, 1_600_000_000_000)
+
+    monkeypatch.setattr("app.sources.lichess_history_page", page)
+    monkeypatch.setattr("app.sync.LIBRARY_PAGE", 15)
+    monkeypatch.setattr(m, "check_account", lambda platform, handle: handle)
+    c = client(m, "full-li@test.com")
+    with c:
+        m.store.set_plan(m.store.user_by_email("full-li@test.com")["id"], "pro")
+        p = m.library.get_or_create_player("lichess", "demo_player")
+        m.library.save(m.store.user_by_email("full-li@test.com")["id"], p["id"])
+        r = c.post(f"/api/library/{p['id']}/full").json()
+        job = c.get(f"/api/jobs/{r['job_id']}").json()
+        assert job["state"] == "done", job
+        assert calls == [(15, None), (15, 1_700_000_000_000 - 1)]  # second page starts just before the oldest game
+        st = c.get(f"/api/library/{p['id']}/full").json()
+        assert st["full_at"] and st["games"] >= 25 and st["cap"] == 3000  # (other tests may share this public player)
+        again = c.post(f"/api/library/{p['id']}/full").json()
+        assert again["job_id"] is None and "this week" in again["message"]
+
+
+def test_full_history_from_chesscom_walks_every_month(m, monkeypatch):
+    first, second = _demo_pages(12, 8)
+    months = ["https://api.chess.com/pub/player/demo_player/games/2026/09", "https://api.chess.com/pub/player/demo_player/games/2026/08",
+              "https://api.chess.com/pub/player/demo_player/games/2026/07"]
+    monkeypatch.setattr("app.sources.chesscom_archives", lambda handle, http=None: list(months))
+    monkeypatch.setattr("app.sources.chesscom_month", lambda url, http=None: {months[0]: first, months[1]: second}.get(url, ""))
+    monkeypatch.setattr("app.sync.LIBRARY_MONTHS_PER_TURN", 2)
+    c = client(m, "full-cc@test.com")
+    with c:
+        uid = m.store.user_by_email("full-cc@test.com")["id"]
+        m.store.set_plan(uid, "coach")
+        p = m.library.get_or_create_player("chesscom", "demo_player")
+        m.library.save(uid, p["id"])
+        r = c.post(f"/api/library/{p['id']}/full").json()
+        job = c.get(f"/api/jobs/{r['job_id']}").json()
+        assert job["state"] == "done", job
+        assert m.library.player(p["id"])["games"] >= 20 and m.library.player(p["id"])["full_at"]
+
+
+def test_full_history_cap_and_pgn_players(m, monkeypatch):
+    first, second = _demo_pages(15, 10)
+    monkeypatch.setattr("app.sources.lichess_history_page", lambda h, want, until=None, http=None: (first, 15, 1_700_000_000_000))
+    monkeypatch.setitem(m.PLANS["pro"], "library_full_games", 15)
+    c, pgn_pid = _pro_with_player(m, "full-cap@test.com", "demo_player")
+    with c:
+        uid = m.store.user_by_email("full-cap@test.com")["id"]
+        assert c.post(f"/api/library/{pgn_pid}/full").status_code == 400
+        p = m.library.get_or_create_player("lichess", "cap_player_x")
+        m.library.save(uid, p["id"])
+        r = c.post(f"/api/library/{p['id']}/full").json()
+        assert c.get(f"/api/jobs/{r['job_id']}").json()["state"] == "done"
+        assert m.library.player(p["id"])["full_at"]  # stopped at the plan's cap after one page

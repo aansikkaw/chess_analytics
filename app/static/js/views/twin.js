@@ -2,7 +2,7 @@
 // The board is on the left; the Twin's reasoning (book or model, and what else it considered) is on the right;
 // below are the Twin's profile and, after a game, a review. The game is kept in this browser so you can come back to it.
 
-import { api, el, fill, post, store, toast, track } from "../core.js";
+import { api, el, fill, post, store, svg, toast, track } from "../core.js";
 import { Board, boardSettings, sideToMove } from "../board.js";
 import { openPosition } from "./common.js";
 
@@ -66,7 +66,7 @@ function buildCard(content, player, st, tc) {
   const why = !st.engine ? "Stockfish isn't running on this server, so Twins can't be built here."
     : !enough ? `The Twin needs at least ${st.min_games} games with these time controls; there are ${st.games}. Update the player or download more games.`
       : !st.builds_left ? "You've used today's Twin builds. Try again tomorrow."
-        : `It studies up to 40 of their ${st.games} games with the engine (about a minute or two), then you can play it.`;
+        : `First it studies ${(st.study && st.study.next_batch) || st.games} of their ${st.games} games with the engine (about ${Math.max(1, Math.round((((st.study && st.study.next_batch) || st.games) * 1.1) / 60))} min), newest first plus a spread across their history. Afterwards "Keep learning" studies more, and their book always uses every game.`;
   return el("section", { class: "sheet stack twin-build" },
     el("h3", { text: "Build their Twin" }),
     el("ol", { class: "twin-steps small" },
@@ -76,7 +76,7 @@ function buildCard(content, player, st, tc) {
     el("p", { class: "small muted", text: why }), el("div", { class: "row" }, btn), out);
 }
 
-async function watchJob(out, jobId, done) {
+export async function watchJob(out, jobId, done) {
   const bar = el("div", { class: "syncbar twin-bar" }, el("i"));
   const label = el("p", { class: "small muted", text: "Starting…" });
   fill(out, label, bar);
@@ -85,8 +85,8 @@ async function watchJob(out, jobId, done) {
     try { j = await api(`/api/jobs/${jobId}`); } catch (e) { fill(out, el("p", { class: "err", text: e.message })); return; }
     if (j.state === "done") { toast("The Twin is ready."); done(); return; }
     if (j.state === "error") { fill(out, el("p", { class: "err", text: j.error || "The build failed." })); return; }
-    label.textContent = j.state === "queued" ? `Waiting for a free engine${j.position ? ` (${j.position} ahead)` : ""}…`
-      : `${j.stage || "Working"}${j.total ? `: game ${j.done} of ${j.total}` : ""}…`;
+    label.textContent = j.state === "queued" ? `${j.stage && j.done ? `${j.stage}. ` : ""}Waiting for a free worker${j.position ? ` (${j.position} ahead)` : ""}…`
+      : `${j.stage || "Working"}${j.total && !/\d/.test(j.stage || "") ? `: ${j.done} of ${j.total}` : ""}…`;
     bar.firstChild.style.width = j.total ? `${Math.round((100 * j.done) / j.total)}%` : "8%";
     await new Promise((r) => setTimeout(r, 1500));
   }
@@ -104,21 +104,35 @@ function profileCards(st, content, player, tc) {
   const open = (key, label) => (p.openings && p.openings[key] ? el("p", { class: "small" }, el("b", { text: `${label}: ` }),
     p.openings[key].map((o) => `${o.san} ${o.pct}%`).join(", ")) : null);
   const tt = p.time_trouble || {};
-  const rebuild = el("button", { class: "btn quiet small", type: "button", text: t.stale ? "Rebuild with their new games" : "Rebuild",
-    onclick: async () => {
-      try {
-        const r = await post(`/api/twin/${player.id}/build`, { time_classes: tc ? tc.split(",") : null });
-        if (r.job_id) { rebuild.disabled = true; watchJob(note, r.job_id, () => render(content, player)); } else toast(r.message);
-      } catch (e) { toast(e.message); }
-    } });
+  const sd = st.study || {};
   const note = el("div", { class: "stack" });
+  const learnText = sd.next_batch > 0 ? `Keep learning: study ${sd.next_batch} more of their games`
+    : t.stale ? "Refit with their new games" : null;
+  const learn = learnText ? el("button", { class: "btn small", type: "button", text: learnText, onclick: async () => {
+    try {
+      const r = await post(`/api/twin/${player.id}/build`, { time_classes: tc ? tc.split(",") : null });
+      if (r.job_id) { learn.disabled = true; toast(r.message); watchJob(note, r.job_id, () => render(content, player)); } else toast(r.message);
+    } catch (e) { toast(e.message); }
+  } }) : null;
+  const studied = sd.available ? Math.round((100 * sd.studied) / sd.available) : 0;
+  const learnNote = sd.next_batch > 0 ? null : sd.studied >= sd.available
+    ? "It has studied every game in the library for these time controls."
+    : `It has studied ${sd.studied} games, your plan's limit.`;
   return el("div", { class: "twin-profile" },
     el("section", { class: "sheet stack" }, el("h3", { text: "How faithful is it?" }),
       el("div", { class: "twin-big" }, el("b", { text: pct(f.twin_top3) }),
         el("span", { class: "small", text: `of their real moves were among the Twin's top 3 choices, in games it never saw (Stockfish's top 3: ${pct(f.engine_top3)}).` })),
       el("p", { class: "small muted", text: `First choice exactly right: Twin ${pct(f.twin_top1)}, Stockfish ${pct(f.engine_top1)}.${f.book_top1 != null ? ` Their opening moves predicted by their own book: ${f.book_top1}%.` : ""}` }),
-      el("p", { class: "tiny faint", text: `Learned from ${t.decisions} of their decisions in ${t.games} games (confidence: ${p.confidence}). Built ${new Date(t.built_at * 1000).toLocaleDateString()}, games up to ${t.newest_game || "–"}.` }),
-      el("div", { class: "row" }, rebuild), note),
+      learningCurve(p.learning_curve || []),
+      el("div", { class: "twin-study" },
+        el("div", { class: "row between" }, el("b", { class: "small", text: `Studied ${sd.studied ?? t.games} of ${sd.available ?? "–"} games` }),
+          el("span", { class: "tiny faint", text: `${studied}%` })),
+        el("div", { class: "twin-acc-track" }, el("i", { style: { width: `${studied}%` } })),
+        el("p", { class: "tiny faint", text: `${t.decisions.toLocaleString()} of their decisions, from ${p.oldest_game || "–"} to ${t.newest_game || "–"}. Recent games count more (a game two years older counts half). Their opening book uses every game in the library.` })),
+      learn ? el("div", { class: "row" }, learn) : el("p", { class: "tiny faint", text: learnNote }),
+      sd.available < 300 && player.platform !== "pgn" ? el("p", { class: "tiny" },
+        "More games make a more faithful Twin. On their player page, ", el("b", { text: "Download full history" }), " gives it their whole career to learn from.") : null,
+      note),
     el("section", { class: "sheet stack" }, el("h3", { text: "How they play" }),
       ...PHASES.map(([k, label]) => bar(label, p.accuracy && p.accuracy[k])),
       el("p", { class: "small muted", text: `${p.blunders_per_100 ?? "–"} blunders and ${p.mistakes_per_100 ?? "–"} mistakes per 100 moves.${tt.moves >= 15 && tt.accuracy != null ? ` In time trouble: ${tt.accuracy}% accuracy (${tt.calm_accuracy}% otherwise).` : ""}` }),
@@ -127,6 +141,28 @@ function profileCards(st, content, player, tc) {
     el("section", { class: "sheet stack" }, el("h3", { text: "Their openings" }),
       open("white", "As White"), open("black_vs_e4", "Against 1.e4"), open("black_vs_d4", "Against 1.d4"),
       el("p", { class: "tiny faint", text: "The Twin plays these from their own games, weighting recent games more." })));
+}
+
+// Faithfulness as more of their games are used (each point: fitted on that many games, tested on the same held-out games).
+function learningCurve(points) {
+  if (points.length < 2) return null;
+  const W = 260, H = 96, P = 22;
+  const xs = points.map((p) => Math.log(p.games)), ys = points.map((p) => p.twin_top3 ?? 0);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.max(0, Math.min(...ys) - 8), y1 = Math.min(100, Math.max(...ys) + 4);
+  const X = (v) => P + ((v - x0) / (x1 - x0 || 1)) * (W - 2 * P);
+  const Y = (v) => H - P + 6 - ((v - y0) / (y1 - y0 || 1)) * (H - P - 10);
+  const line = points.map((p, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)},${Y(ys[i]).toFixed(1)}`).join(" ");
+  const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "twin-curve", role: "img",
+    "aria-label": `Faithfulness rises from ${ys[0]}% with ${points[0].games} games to ${ys[ys.length - 1]}% with ${points[points.length - 1].games} games` },
+    svg("line", { x1: P, x2: W - P, y1: H - P + 6, y2: H - P + 6, class: "axis" }),
+    svg("path", { d: line, class: "curve" }),
+    ...points.map((p, i) => svg("circle", { cx: X(xs[i]), cy: Y(ys[i]), r: 3.2, class: "dot" })),
+    ...points.map((p, i) => svg("text", { x: X(xs[i]), y: H - 3, "text-anchor": "middle", class: "lbl" }, String(p.games))),
+    svg("text", { x: X(xs[0]), y: Y(ys[0]) - 7, "text-anchor": "start", class: "val" }, `${ys[0]}%`),
+    svg("text", { x: X(xs[xs.length - 1]), y: Y(ys[ys.length - 1]) - 7, "text-anchor": "end", class: "val" }, `${ys[ys.length - 1]}%`));
+  return el("figure", { class: "twin-curve-wrap" }, chart,
+    el("figcaption", { class: "tiny faint", text: "Learning curve: how often their real move is in the Twin's top 3, by how many of their games it learned from. A flat line means it already knows them well." }));
 }
 
 // ---------------- setting up a game ----------------

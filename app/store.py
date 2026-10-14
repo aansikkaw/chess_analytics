@@ -216,12 +216,125 @@ CREATE TABLE IF NOT EXISTS twins (   -- Opponent Twins: a fitted move-choice mod
     profile     TEXT NOT NULL,          -- accuracy, style, openings, faithfulness (JSON)
     PRIMARY KEY (player_id, tc_key)
 );
+CREATE TABLE IF NOT EXISTS twin_games (   -- each library game studied once for the Twin (compressed decisions)
+    game_ref    INTEGER PRIMARY KEY,    -- lib_games.id
+    player_id   INTEGER NOT NULL,
+    version     INTEGER NOT NULL,
+    depth       INTEGER NOT NULL,
+    n           INTEGER NOT NULL,
+    data        BLOB NOT NULL,
+    studied_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS twin_games_player ON twin_games (player_id);
 CREATE TABLE IF NOT EXISTS kv (
     k          TEXT PRIMARY KEY,
     v          TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS puzzle_bank (   -- Lichess puzzle database (CC0), prepared for Twin predictions (app/puzzlebank.py)
+    id          TEXT PRIMARY KEY,           -- Lichess PuzzleId (the bundled sample's start with "pb")
+    setup_fen   TEXT NOT NULL,              -- before the opponent's move
+    setup_uci   TEXT NOT NULL,              -- the opponent's move that sets the puzzle
+    fen         TEXT NOT NULL,              -- the position the solver sees
+    moves       TEXT NOT NULL,              -- the solution line in UCI (solver first, with the replies)
+    sans        TEXT NOT NULL,              -- the same line in SAN
+    rating      INTEGER NOT NULL,
+    rd          INTEGER NOT NULL DEFAULT 80,
+    popularity  INTEGER NOT NULL DEFAULT 0,
+    plays       INTEGER NOT NULL DEFAULT 0,
+    themes      TEXT NOT NULL DEFAULT '',
+    phase       TEXT NOT NULL DEFAULT '',
+    game_url    TEXT NOT NULL DEFAULT '',
+    opening     TEXT NOT NULL DEFAULT '',
+    source      TEXT NOT NULL DEFAULT 'lichess',
+    feats       BLOB,                       -- Stockfish's candidates for the first move with the Twin's features (shared by everyone)
+    feats_v     INTEGER,
+    feats_depth INTEGER
+);
+CREATE INDEX IF NOT EXISTS puzzle_bank_rating ON puzzle_bank (rating);
+CREATE TABLE IF NOT EXISTS self_twin_games (   -- your own games, studied once for your Twin (app/predict.py)
+    username    TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    depth       INTEGER NOT NULL,
+    n           INTEGER NOT NULL,
+    data        BLOB NOT NULL,
+    studied_at  REAL NOT NULL,
+    PRIMARY KEY (username, game_id)
+);
+CREATE TABLE IF NOT EXISTS self_twins (   -- your Twin: the choice model fitted to your own games
+    username    TEXT PRIMARY KEY,
+    version     INTEGER NOT NULL,
+    built_at    REAL NOT NULL,
+    games       INTEGER NOT NULL,
+    decisions   INTEGER NOT NULL,
+    params      TEXT NOT NULL,
+    profile     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS puzzle_skill (   -- your puzzle rating (Glicko), theme skills and the predictions' track record
+    username    TEXT PRIMARY KEY,
+    rating      REAL NOT NULL,
+    rd          REAL NOT NULL,
+    themes      TEXT NOT NULL DEFAULT '{}',
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    expected    REAL NOT NULL DEFAULT 0,  -- sum of predicted miss probabilities
+    missed      INTEGER NOT NULL DEFAULT 0,
+    brier       REAL NOT NULL DEFAULT 0,
+    updated_at  REAL
+);
+CREATE TABLE IF NOT EXISTS think_games (   -- games scanned by the "Think here" trainer (app/think.py)
+    username    TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    moments     INTEGER NOT NULL,
+    scanned_at  REAL NOT NULL,
+    PRIMARY KEY (username, game_id)
+);
+CREATE TABLE IF NOT EXISTS think_moments (   -- each of your moves with clock data: how long you took, and how much it mattered
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    username    TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    ply         INTEGER NOT NULL,
+    fen         TEXT NOT NULL,
+    prev_fen    TEXT,
+    prev_uci    TEXT,
+    played      TEXT NOT NULL,
+    played_san  TEXT NOT NULL,
+    cands       TEXT NOT NULL,              -- engine's top moves: [[uci, san, win%], ...]
+    best_win    REAL NOT NULL,
+    gap         REAL NOT NULL,              -- win% points between the best and second-best move
+    loss        REAL NOT NULL,              -- win% the move you played lost (from the game analysis)
+    spent       REAL NOT NULL,              -- seconds you took
+    clock       REAL,                       -- seconds left before the move
+    base        INTEGER,
+    critical    INTEGER NOT NULL,           -- one move clearly matters
+    obvious     INTEGER NOT NULL DEFAULT 0, -- a plain recapture or a forced reply: no need to think long
+    phase       TEXT NOT NULL,
+    time_class  TEXT NOT NULL DEFAULT '',
+    played_at   TEXT NOT NULL DEFAULT '',
+    opponent    TEXT NOT NULL DEFAULT '',
+    move_number INTEGER NOT NULL,
+    box         INTEGER NOT NULL DEFAULT 0,  -- 0: never drilled
+    due_at      REAL NOT NULL DEFAULT 0,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    calls_right INTEGER NOT NULL DEFAULT 0,
+    solved      INTEGER NOT NULL DEFAULT 0,
+    last_call   TEXT,
+    UNIQUE (username, game_id, ply)
+);
+CREATE INDEX IF NOT EXISTS think_moments_user ON think_moments (username, critical);
+CREATE TABLE IF NOT EXISTS game_reviews (   -- full game reviews: the engine's report card and the coach's write-up (app/review.py)
+    username    TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    depth       INTEGER NOT NULL,
+    report      TEXT NOT NULL,
+    ai          TEXT,
+    created_at  REAL NOT NULL,
+    ai_at       REAL,
+    PRIMARY KEY (username, game_id)
+);
 """
+PER_PLAYER_TABLES = ("games", "puzzles", "self_twin_games", "self_twins", "puzzle_skill", "think_games", "think_moments", "game_reviews")
 
 USER_COLUMNS = {  # added after v0.4; created by _migrate on older databases
     "email_verified_at": "REAL",
@@ -261,8 +374,12 @@ class Store:
                 c.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")  # names/decls are constants above
         if "consent_at" not in cols("students"):
             c.execute("ALTER TABLE students ADD COLUMN consent_at REAL")  # coach confirmed the student (or a parent) agreed
+        if "full_at" not in cols("lib_players"):
+            c.execute("ALTER TABLE lib_players ADD COLUMN full_at REAL")  # when a full-history download last finished
         if "plan" not in cols("upgrade_requests"):
             c.execute("ALTER TABLE upgrade_requests ADD COLUMN plan TEXT NOT NULL DEFAULT 'pro'")
+        if "meta" not in cols("puzzles"):
+            c.execute("ALTER TABLE puzzles ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")  # predicted puzzles: source, odds, reasons
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -412,10 +529,12 @@ class Store:
         d["line"] = json.loads(d["line"])
         d["themes"] = json.loads(d["themes"])
         d["accept"] = json.loads(d.get("accept") or "[]")
+        d["meta"] = json.loads(d.get("meta") or "{}")
         return d
 
-    def puzzles(self, username: str, due_only: bool = True, limit: int = 20) -> list[dict]:
-        sql = "SELECT * FROM puzzles WHERE username = ?"
+    def puzzles(self, username: str, due_only: bool = True, limit: int = 20, predicted: bool = False) -> list[dict]:
+        """Your deck: mistakes from your games and repertoire drills, or (predicted=True) Twin-predicted bank puzzles."""
+        sql = "SELECT * FROM puzzles WHERE username = ? AND kind " + ("= 'predicted'" if predicted else "!= 'predicted'")
         args: list = [username.lower()]
         if due_only:
             sql += " AND due_at <= ?"
@@ -429,7 +548,7 @@ class Store:
     def count_due(self, username: str) -> int:
         with self._conn() as c:
             return c.execute(
-                "SELECT COUNT(*) FROM puzzles WHERE username = ? AND due_at <= ?",
+                "SELECT COUNT(*) FROM puzzles WHERE username = ? AND due_at <= ? AND kind != 'predicted'",
                 (username.lower(), time.time()),
             ).fetchone()[0]
 
@@ -458,8 +577,8 @@ class Store:
 
     def delete_player(self, player_key: str) -> None:
         with self._conn() as c:
-            c.execute("DELETE FROM games WHERE username = ?", (player_key.lower(),))
-            c.execute("DELETE FROM puzzles WHERE username = ?", (player_key.lower(),))
+            for table in PER_PLAYER_TABLES:
+                c.execute(f"DELETE FROM {table} WHERE username = ?", (player_key.lower(),))  # table names are constants
 
     # ---- users & sessions ------------------------------------------------
     def create_user(self, email: str, pw_hash: str, plan: str = "free", is_admin: bool = False) -> int:
@@ -517,8 +636,8 @@ class Store:
         with self._conn() as c:
             for a in accounts:
                 key = f"u{a['user_id']}:{a['platform']}:{a['handle'].lower()}"
-                c.execute("DELETE FROM games WHERE username = ?", (key,))
-                c.execute("DELETE FROM puzzles WHERE username = ?", (key,))
+                for table in PER_PLAYER_TABLES:
+                    c.execute(f"DELETE FROM {table} WHERE username = ?", (key,))  # table names are constants
             for table in ("accounts", "repertoires", "sessions", "usage", "upgrade_requests", "email_tokens"):
                 c.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))  # table names are constants
             c.execute("DELETE FROM support_messages WHERE user_id = ?", (user_id,))
@@ -532,6 +651,7 @@ class Store:
                 c.execute("DELETE FROM lib_positions WHERE game_ref IN (SELECT id FROM lib_games WHERE player_id = ?)", (pid,))
                 c.execute("DELETE FROM lib_games WHERE player_id = ?", (pid,))
                 c.execute("DELETE FROM twins WHERE player_id = ?", (pid,))
+                c.execute("DELETE FROM twin_games WHERE player_id = ?", (pid,))
                 c.execute("DELETE FROM lib_players WHERE id = ?", (pid,))
             c.execute("DELETE FROM users WHERE id = ?", (user_id,))
         return accounts
@@ -546,12 +666,18 @@ class Store:
             user = dict(c.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
             for secret in ("pw_hash", "unsubscribe_token"):
                 user.pop(secret, None)
-            out = {"user": user, "accounts": accounts, "games": {}, "puzzles": {}}
+            out = {"user": user, "accounts": accounts, "games": {}, "puzzles": {}, "puzzle_skill": {}, "twin_of_you": {}, "think_moments": {}}
             for a in accounts:
                 key = f"u{a['user_id']}:{a['platform']}:{a['handle'].lower()}"
                 label = f"{a['platform']}-{a['handle']}"
                 out["games"][label] = [json.loads(r["data"]) for r in c.execute("SELECT data FROM games WHERE username = ?", (key,))]
                 out["puzzles"][label] = rows(c, "SELECT * FROM puzzles WHERE username = ?", (key,))
+                out["puzzle_skill"][label] = rows(c, "SELECT rating, rd, themes, attempts, expected, missed, updated_at FROM puzzle_skill "
+                                                     "WHERE username = ?", (key,))
+                out["twin_of_you"][label] = rows(c, "SELECT built_at, games, decisions, params, profile FROM self_twins WHERE username = ?", (key,))
+                out["think_moments"][label] = rows(c, "SELECT game_id, ply, fen, played_san, best_win, gap, loss, spent, critical, box, "
+                                                      "attempts, calls_right, solved FROM think_moments WHERE username = ?", (key,))
+                out.setdefault("game_reviews", {})[label] = rows(c, "SELECT game_id, created_at, ai, ai_at FROM game_reviews WHERE username = ?", (key,))
             out["repertoires"] = rows(c, "SELECT * FROM repertoires WHERE user_id = ?", (user_id,))
             out["usage"] = rows(c, "SELECT day, kind, count FROM usage WHERE user_id = ? ORDER BY day", (user_id,))
             out["plan_requests"] = rows(c, "SELECT * FROM upgrade_requests WHERE user_id = ?", (user_id,))

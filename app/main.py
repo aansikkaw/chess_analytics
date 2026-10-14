@@ -9,10 +9,12 @@ Engine-heavy work (imports, Prep Checks, previews) goes through the job queue (a
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
 import os
+import re
 from html import escape as html_escape
 import time
 import uuid
@@ -27,6 +29,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from . import auth
 from .analysis import classify, move_accuracy, win_percent
@@ -35,6 +38,10 @@ from .config import load_settings
 from .engine import Engine, EngineUnavailable
 from .games import TIME_CLASSES, GameImportError, decode_upload, name_matches, parse_pgn, player_names, validate_pgn_name, validate_username
 from .jobs import JobQueue
+from . import predict as predict_mod
+from . import puzzlebank, scoresheet
+from . import review as review_mod
+from . import think as think_mod
 from . import twin as twin_mod
 from .library import ALL_CLASSES, Library, board_from, to_pgn
 from .llm import resolve_backends
@@ -85,6 +92,9 @@ test_email_limiter = auth.SharedLimiter(store, "test_email", limit=10, window=36
 export_limiter = auth.SharedLimiter(store, "export", limit=5, window=3600)
 twin_move_limiter = auth.SharedLimiter(store, "twin_move", limit=1500, window=3600)  # Twin moves per user per hour
 twin_review_limiter = auth.SharedLimiter(store, "twin_review", limit=40, window=3600)
+scan_limiter = auth.SharedLimiter(store, "scan", limit=settings.scans_per_hour, window=3600)  # scoresheet photos per user
+decode_limiter = auth.SharedLimiter(store, "scan_decode", limit=600, window=3600)
+think_limiter = auth.SharedLimiter(store, "think_answer", limit=1500, window=3600)
 
 
 def audit(user: dict | None, action: str, target: str | None = None, **detail) -> None:
@@ -186,7 +196,8 @@ async def security_headers(request: Request, call_next):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "same-origin"
     resp.headers["Content-Security-Policy"] = CSP
-    resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    # The camera is allowed for this site only (the scoresheet scanner); never for embedded pages.
+    resp.headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()"
     if settings.cookie_secure:
         resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     path = request.url.path
@@ -570,8 +581,9 @@ def me(user: dict = Depends(current_user)) -> dict:
         "sponsored_by": user.get("sponsored_by"), "max_students": p.get("max_students", 0),
         "coaches": [{"student_id": c["id"], "coach_email": c["coach_email"]} for c in store.coaches_of(user["id"])],
         "features": sorted(p["features"]),
-        "limits": {k: p.get(k, 0) for k in ("max_games_per_sync", "max_accounts", "coach_messages_per_day", "scouts_per_day", "library_players")},
-        "usage_today": {"coach": store.usage_today(user["id"], "coach"), "scout": store.usage_today(user["id"], "scout")},
+        "limits": {k: p.get(k, 0) for k in ("max_games_per_sync", "max_accounts", "coach_messages_per_day", "scouts_per_day", "library_players",
+                                            "predicted_per_day", "self_twin_games", "think_games", "scans_per_day")},
+        "usage_today": {k: store.usage_today(user["id"], k) for k in ("coach", "scout", "predicted", "scan")},
         "accounts": [account_view(a) for a in store.accounts(user["id"])],
     }
 
@@ -610,6 +622,7 @@ def export_me(user: dict = Depends(current_user)) -> StreamingResponse:
                    "account.json        your account, linked chess accounts and settings (times are Unix seconds)\n"
                    "games/*.json        every analysed game, per linked account\n"
                    "puzzles/*.json      puzzles made from your mistakes, with your training progress\n"
+                   "training.json       your puzzle rating, your Twin (fitted to your games) and your timed moves (Think here)\n"
                    "activity.json       repertoires, daily usage, plan requests, support messages, coaching, security log\n\n"
                    "Questions: " + (settings.support_email or settings.public_url) + "\n")
         dump = lambda obj: json.dumps(obj, indent=2, default=str)  # noqa: E731
@@ -618,6 +631,7 @@ def export_me(user: dict = Depends(current_user)) -> StreamingResponse:
             z.writestr(f"games/{label}.json", dump(games))
         for label, rows in data["puzzles"].items():
             z.writestr(f"puzzles/{label}.json", dump(rows))
+        z.writestr("training.json", dump({k: data[k] for k in ("puzzle_skill", "twin_of_you", "think_moments")}))
         z.writestr("activity.json", dump({k: data[k] for k in ("repertoires", "usage", "plan_requests", "support_messages", "roster", "opponent_library",
                                                                 "homework_set", "squads_joined", "homework_received", "security_log")}))
     buf.seek(0)
@@ -817,14 +831,18 @@ def puzzles(account_id: int, due: bool = True, limit: int = 20, user: dict = Dep
     rows = store.puzzles(key, due_only=due, limit=max(1, min(limit, 100)))
     _add_puzzle_context(key, rows)
     for r in rows:  # don't ship the answer to the browser before the attempt
-        for k in ("solution", "solution_san", "line", "accept"):
+        for k in ("solution", "solution_san", "line", "accept", "meta"):
             r.pop(k, None)
     return rows
 
 
 def _add_puzzle_context(key: str, rows: list[dict]) -> None:
     """The opponent's move that led to each puzzle (so the board can play it in first), and which game it's from."""
-    games = store.games_meta(key, {r["game_id"] for r in rows if not r["game_id"].startswith("prep-")})
+    for r in rows:
+        if r.get("kind") == "predicted":  # a bank puzzle: the opponent's move is part of the puzzle
+            meta = r.get("meta") or {}
+            r.update(prev_fen=meta.get("prev_fen"), prev_uci=meta.get("prev_uci"))
+    games = store.games_meta(key, {r["game_id"] for r in rows if not r["game_id"].startswith(("prep-", "lp-"))})
     for r in rows:
         g = games.get(r["game_id"])
         if not g:
@@ -868,7 +886,21 @@ def puzzle_reveal(puzzle_id: int, body: RevealRequest, user: dict = Depends(curr
     """Show the solution without answering: counts as a miss unless it's a practice run."""
     p = _owned_puzzle(puzzle_id, user)
     srs = {"practice": True} if body.practice else store.record_attempt(puzzle_id, False)
-    return {"solution": p["solution"], "solution_san": p["solution_san"], "line": p["line"], "kind": p.get("kind", "mistake"), **srs}
+    extra = _prediction_result(p, solved=False, first=not body.practice and p["attempts"] == 0)
+    return {"solution": p["solution"], "solution_san": p["solution_san"], "line": p["line"], "kind": p.get("kind", "mistake"), **srs, **extra}
+
+
+def _prediction_result(p: dict, solved: bool, first: bool) -> dict:
+    """For a Twin-predicted puzzle: was the prediction right, the reasons behind it, and your updated puzzle rating."""
+    if p.get("kind") != "predicted":
+        return {}
+    meta = p.get("meta") or {}
+    out = {"why": meta.get("why_after", []), "game_url": meta.get("game_url") or None, "puzzle_rating": meta.get("rating"),
+           "predicted_miss": round(100 * float(meta.get("p_miss") or 0)), "bank_id": meta.get("bank_id")}
+    if first:  # only your first try teaches the model (retries after seeing the answer don't)
+        games = store.load_games(p["username"])
+        out["prediction"] = predict_mod.record_result(store, p["username"], rating_dna(games) if games else None, meta, p["themes"], solved)
+    return out
 
 
 @app.post("/api/engine/analyse")
@@ -940,8 +972,10 @@ def attempt(puzzle_id: int, req: AttemptRequest, user: dict = Depends(current_us
         if win_percent(best.cp_for(side)) - win_percent(after.cp_for(side)) <= ALSO_GOOD_WIN_PCT:
             verdict, note = "also_good", "Not the engine's first choice, but just as good."
     srs = {"practice": True} if req.practice else store.record_attempt(puzzle_id, verdict != "wrong" and not req.hinted)
+    extra = _prediction_result(p, solved=verdict != "wrong" and not req.hinted, first=not req.practice and p["attempts"] == 0)
     return {"verdict": verdict, "note": note, "your_move": board.san(move), "your_uci": move.uci(), "solution": p["solution"],
-            "kind": p.get("kind", "mistake"), "solution_san": p["solution_san"], "line": p["line"], "you_played_in_game": p["played_san"], **srs}
+            "kind": p.get("kind", "mistake"), "solution_san": p["solution_san"], "line": p["line"], "you_played_in_game": p["played_san"],
+            **srs, **extra}
 
 
 @app.post("/api/accounts/{account_id}/coach")
@@ -1123,6 +1157,39 @@ def library_update(player_id: int, user: dict = Depends(library_user)) -> dict:
     return {"player": library.entry(user["id"], player_id), "downloaded": downloaded, "new_games": new, "message": msg}
 
 
+@app.get("/api/library/{player_id}/full")
+def library_full_status(player_id: int, user: dict = Depends(library_user)) -> dict:
+    p = _owned_library_player(user, player_id)
+    job = queue.find_recent("library_full", f"full:{player_id}", 24 * 3600)
+    active = job["id"] if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"] else None
+    return {"job_id": active, "full_at": p.get("full_at"), "games": p["games"], "cap": _full_cap(user)}
+
+
+def _full_cap(user: dict) -> int:
+    return min(plan_of(user).get("library_full_games", 0), settings.library_full_max)
+
+
+@app.post("/api/library/{player_id}/full")
+def library_full(player_id: int, user: dict = Depends(library_user)) -> dict:
+    """Download the player's whole rated history (up to the plan's limit) in the background."""
+    p = _owned_library_player(user, player_id)
+    if p["platform"] == "pgn":
+        raise HTTPException(400, "This player's games come from a PGN upload. Upload their full database instead.")
+    platform_allowed(p["platform"])
+    imports_allowed()
+    job = queue.find_recent("library_full", f"full:{player_id}", 24 * 3600)
+    if job and job["state"] in ("queued", "running"):
+        if job["user_id"] == user["id"]:
+            return {"job_id": job["id"], "message": "Already downloading."}
+        raise HTTPException(409, "Someone else is downloading this player's history right now. Try again when it's done.")
+    if p.get("full_at") and time.time() - p["full_at"] < 7 * 86_400:
+        return {"job_id": None, "message": "Their full history was downloaded this week. Update fetches anything newer."}
+    spend(user, "scout", plan_of(user)["scouts_per_day"])
+    job_id = jobs.submit("library_full", {"player_id": player_id, "cap": _full_cap(user), "key": f"full:{player_id}"}, user["id"])
+    audit(user, "library_full_history", f"library:{player_id}")
+    return {"job_id": job_id, "message": f"Downloading {p['handle']}'s full history in the background. Big histories take a few minutes."}
+
+
 @app.get("/api/library/{player_id}/report")
 def library_report(player_id: int, games: int = 200, account_id: int | None = None, user: dict = Depends(library_user)) -> dict:
     _owned_library_player(user, player_id)
@@ -1258,14 +1325,22 @@ def _twin_view(t: dict | None, player: dict, classes: list[str]) -> dict | None:
     if not t:
         return None
     with store._conn() as c:
-        sql = "SELECT COUNT(*), MAX(played_at) FROM lib_games WHERE player_id = ?"
+        sql = "SELECT MAX(played_at) FROM lib_games WHERE player_id = ?"
         args: list = [player["id"]]
         if classes:
             sql += f" AND time_class IN ({','.join('?' * len(classes))})"
             args += classes
-        count, newest = c.execute(sql, args).fetchone()
-    stale = bool(newest and newest > t["newest_game"]) and (count or 0) - t["games"] >= 0
-    return {k: t[k] for k in ("tc_key", "built_at", "games", "decisions", "newest_game", "profile")} | {"stale": stale, "games_available": count}
+        newest = c.execute(sql, args).fetchone()[0]
+    stale = bool(newest and newest > t["newest_game"])
+    return {k: t[k] for k in ("tc_key", "built_at", "games", "decisions", "newest_game", "profile")} | {"stale": stale}
+
+
+def _study_room(user: dict, player_id: int, classes: list[str]) -> dict:
+    """How much more this Twin can learn: games studied, available, and the plan's limit."""
+    studied, available = twin_mod.study_counts(store, player_id, classes, settings.twin_depth)
+    cap = plan_of(user).get("twin_study_max", 0)
+    return {"studied": studied, "available": available, "study_max": cap,
+            "next_batch": max(0, min(settings.twin_games, cap - studied, available - studied))}
 
 
 @app.get("/api/twin/{player_id}")
@@ -1273,37 +1348,39 @@ def twin_status(player_id: int, tc: str = "", user: dict = Depends(library_user)
     player = _owned_library_player(user, player_id)
     classes = _twin_classes(tc.split(",") if tc else None)
     key = twin_mod.tc_key(classes)
-    job = queue.find_recent("twin", f"{player_id}:{key}", 3600)
+    job = queue.find_recent("twin", f"{player_id}:{key}", 6 * 3600)
     active = job["id"] if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"] else None
-    with store._conn() as c:
-        sql = "SELECT COUNT(*) FROM lib_games WHERE player_id = ?"
-        args: list = [player_id]
-        if classes:
-            sql += f" AND time_class IN ({','.join('?' * len(classes))})"
-            args += classes
-        games = c.execute(sql, args).fetchone()[0]
+    room = _study_room(user, player_id, classes)
     left = max(0, plan_of(user).get("twin_builds_per_day", 0) - store.usage_today(user["id"], "twin_build"))
     return {"player": library.entry(user["id"], player_id), "tc_key": key, "twin": _twin_view(twin_mod.load(store, player_id, key), player, classes),
-            "job_id": active, "games": games, "min_games": twin_mod.MIN_GAMES, "builds_left": left,
-            "engine": state["engine"] is not None}
+            "job_id": active, "games": room["available"], "min_games": twin_mod.MIN_GAMES, "builds_left": left,
+            "engine": state["engine"] is not None, "study": room}
 
 
 @app.post("/api/twin/{player_id}/build")
 def twin_build(player_id: int, body: TwinBuild, user: dict = Depends(library_user)) -> dict:
+    """Build the Twin, or (when it exists) let it keep learning: study the next batch of games and refit."""
     _twin_allowed()
     player = _owned_library_player(user, player_id)
     classes = _twin_classes(body.time_classes)
     key = twin_mod.tc_key(classes)
-    existing = _twin_view(twin_mod.load(store, player_id, key), player, classes)
-    if existing and not existing["stale"] and time.time() - existing["built_at"] < 86_400:
-        return {"job_id": None, "message": "This Twin is already up to date.", "twin": existing}
-    job = queue.find_recent("twin", f"{player_id}:{key}", 3600)
+    job = queue.find_recent("twin", f"{player_id}:{key}", 6 * 3600)
     if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"]:
-        return {"job_id": job["id"], "message": "Already building."}
+        return {"job_id": job["id"], "message": "Already learning."}
+    existing = _twin_view(twin_mod.load(store, player_id, key), player, classes)
+    room = _study_room(user, player_id, classes)
+    if existing and not existing["stale"] and room["next_batch"] == 0:
+        why = "every one of their games is already studied" if room["studied"] >= room["available"] else \
+            f"it has studied {room['studied']} games, your plan's limit"
+        return {"job_id": None, "message": f"This Twin is up to date: {why}.", "twin": existing}
     spend(user, "twin_build", plan_of(user).get("twin_builds_per_day", 0))
-    job_id = jobs.submit("twin", {"player_id": player_id, "time_classes": classes, "key": f"{player_id}:{key}"}, user["id"])
-    audit(user, "twin_built", f"library:{player_id}", time_classes=key)
-    return {"job_id": job_id, "message": f"Building {player['handle']}'s Twin. It studies their games with the engine: usually 1-2 minutes."}
+    job_id = jobs.submit("twin", {"player_id": player_id, "time_classes": classes, "key": f"{player_id}:{key}",
+                                  "budget": room["next_batch"]}, user["id"])
+    audit(user, "twin_built", f"library:{player_id}", time_classes=key, batch=room["next_batch"])
+    minutes = max(1, round(room["next_batch"] * 1.1 / 60))
+    verb = "Teaching" if existing else "Building"
+    return {"job_id": job_id, "message": f"{verb} {player['handle']}'s Twin: studying {room['next_batch']} more games "
+                                         f"(about {minutes} minute{'s' if minutes != 1 else ''})."}
 
 
 def _twin_or_404(player_id: int, classes: list[str]) -> dict:
@@ -1406,6 +1483,400 @@ def twin_review(player_id: int, body: TwinReview, user: dict = Depends(library_u
     mistakes.sort(key=lambda m: -m["win_loss"])
     return {"your_accuracy": mean(yours), "twin_accuracy": mean(theirs), "mistakes": mistakes[:6],
             "left_book": left_book, "moves": len(moves), "over": _game_over(board)}
+
+
+# ---- Twin-predicted puzzles: the mistakes you haven't made yet ------------------------------------------
+class PredictRefresh(BaseModel):
+    twin: bool = False  # also let your Twin study more of your games first
+
+
+def _active_job(kind: str, account_id: int, user: dict) -> str | None:
+    job = queue.find_recent(kind, f"{kind}:{account_id}", 6 * 3600)
+    return job["id"] if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"] else None
+
+
+def _public_predicted(r: dict) -> dict:
+    """A predicted puzzle as the browser may see it before answering: no solution, no source game, no Twin's pick."""
+    meta = r.pop("meta", None) or {}
+    for k in ("solution", "solution_san", "line", "accept"):
+        r.pop(k, None)
+    r["predicted"] = {k: meta.get(k) for k in ("rating", "p_miss", "p_typical", "why_before", "model", "source")}
+    return r
+
+
+@app.get("/api/accounts/{account_id}/predicted")
+def predicted(account_id: int, user: dict = Depends(current_user)) -> dict:
+    acct = owned_account(account_id, user)
+    key = player_key(acct)
+    games = games_or_404(acct)
+    puzzlebank.ensure_bank(store)
+    st = predict_mod.status(store, key, rating_dna(games), len(games), settings.twin_depth)
+    per_day = plan_of(user).get("predicted_per_day", 0)
+    rows = store.puzzles(key, due_only=True, limit=50, predicted=True)
+    _add_puzzle_context(key, rows)
+    return {"status": st, "puzzles": [_public_predicted(r) for r in rows], "per_day": per_day,
+            "left_today": max(0, per_day - store.usage_today(user["id"], "predicted")), "job_id": _active_job("predict", account_id, user),
+            "study_max": plan_of(user).get("self_twin_games", 0), "min_games": settings.self_twin_min_games,
+            "paused": not switches.is_on(store, "predicted")}
+
+
+@app.post("/api/accounts/{account_id}/predicted/refresh")
+def predicted_refresh(account_id: int, body: PredictRefresh, user: dict = Depends(verified_user)) -> dict:
+    """Pick your next predicted puzzles (and, with twin=true, let your Twin study more of your games first)."""
+    if not switches.is_on(store, "predicted"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["predicted"])
+    acct = owned_account(account_id, user)
+    key = player_key(acct)
+    games = games_or_404(acct)
+    active = _active_job("predict", account_id, user)
+    if active:
+        return {"job_id": active, "message": "Already working on it."}
+    if state["engine"] is None and settings.job_mode == "thread":
+        raise HTTPException(503, "Stockfish isn't running on this server right now.")
+    per_day = plan_of(user).get("predicted_per_day", 0)
+    left = max(0, per_day - store.usage_today(user["id"], "predicted"))
+    study = 0
+    if body.twin:
+        studied = len(predict_mod.studied_ids(store, key, settings.twin_depth))
+        cap = plan_of(user).get("self_twin_games", 0)
+        study = max(0, min(cap - studied, len(games) - studied, 100))
+    n = min(10, left)
+    if not n and not body.twin:
+        raise HTTPException(429, {"message": f"You've had today's {per_day} predicted puzzles. New ones tomorrow."
+                                             + ("" if is_pro(user) else " Pro gives you 40 a day."), "upgrade": not is_pro(user)})
+    job_id = jobs.submit("predict", {"n": n, "study": study, "fit": body.twin, "key": f"predict:{account_id}"}, user["id"], account_id)
+    if study:
+        minutes = max(1, round(study * 1.1 / 60))
+        msg = f"Your Twin is studying {study} more of your games (about {minutes} minute{'s' if minutes != 1 else ''}), then it picks your puzzles."
+    else:
+        msg = f"Picking your next {n} puzzles." if n else "Updating your Twin."
+    return {"job_id": job_id, "message": msg}
+
+
+# ---- Game report card: a full review of one game (both sides, Stockfish + the coach's write-up) ---------------
+class ReviewRequest(BaseModel):
+    ai: bool = True  # have the AI coach write it up (if a model is set up and today's allowance isn't used)
+
+
+def _job_for(kind: str, key: str, user: dict) -> str | None:
+    job = queue.find_recent(kind, key, 6 * 3600)
+    return job["id"] if job and job["state"] in ("queued", "running") and job["user_id"] == user["id"] else None
+
+
+def _review_limits(user: dict) -> dict:
+    p = plan_of(user)
+    budget = p.get("ai_tokens_per_day", 0)
+    can_ai = bool(resolve_backends(settings)) and switches.is_on(store, "ai_coach") and not (
+        budget and store.usage_today(user["id"], "ai_tokens") >= budget)
+    return {"can_ai": can_ai, "ai_left": max(0, p.get("ai_reviews_per_day", 0) - store.usage_today(user["id"], "ai_review")),
+            "reviews_left": max(0, p.get("reviews_per_day", 0) - store.usage_today(user["id"], "review"))}
+
+
+@app.get("/api/accounts/{account_id}/game/{game_id}/review")
+def game_review(account_id: int, game_id: str, user: dict = Depends(current_user)) -> dict:
+    """The game's report card if it's ready; otherwise whether it's being made (or the game is still importing)."""
+    acct = owned_account(account_id, user)
+    key = player_key(acct)
+    job = _job_for("review", f"review:{account_id}:{game_id}", user)
+    have = review_mod.load(store, key, game_id)
+    if have:
+        return {"state": "ready", **have, "job_id": job, **_review_limits(user)}
+    if not any(g.game_id == game_id for g in store.load_games(key)):
+        importing = queue.active_for_account(account_id)
+        if importing:
+            return {"state": "importing", "job_id": importing}
+        raise HTTPException(404, "No such game.")
+    return {"state": "running" if job else "none", "job_id": job, **_review_limits(user)}
+
+
+@app.post("/api/accounts/{account_id}/game/{game_id}/review")
+def start_game_review(account_id: int, game_id: str, body: ReviewRequest, user: dict = Depends(verified_user)) -> dict:
+    if not switches.is_on(store, "review"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["review"])
+    acct = owned_account(account_id, user)
+    key = player_key(acct)
+    if not any(g.game_id == game_id for g in store.load_games(key)):
+        raise HTTPException(404, "No such game.")
+    rkey = f"review:{account_id}:{game_id}"
+    job = _job_for("review", rkey, user)
+    if job:
+        return {"job_id": job, "message": "Already reviewing this game."}
+    have = review_mod.load(store, key, game_id)
+    lim = _review_limits(user)
+    need_engine = not have or have["depth"] < settings.review_depth
+    want_ai = body.ai and lim["can_ai"] and lim["ai_left"] > 0 and not (have and (have["ai"] or {}).get("source") == "ai")
+    if not need_engine and not want_ai:
+        msg = ("Today's AI write-ups are used; the built-in coach's review is here." if body.ai and lim["can_ai"] and not lim["ai_left"]
+               else "This game is already reviewed.")
+        return {"job_id": None, "message": msg}
+    if need_engine:
+        if state["engine"] is None and settings.job_mode == "thread":
+            raise HTTPException(503, "Stockfish isn't running on this server, so games can't be reviewed right now.")
+        if not lim["reviews_left"]:
+            raise HTTPException(429, {"message": f"You've had today's {plan_of(user).get('reviews_per_day', 0)} game reviews. More tomorrow."
+                                                 + ("" if is_pro(user) else " Pro reviews 100 a day."), "upgrade": not is_pro(user)})
+        store.bump_usage(user["id"], "review")
+    job_id = jobs.submit("review", {"game_id": game_id, "ai": want_ai, "key": rkey}, user["id"], account_id)
+    return {"job_id": job_id, "ai": want_ai}
+
+
+@app.get("/api/accounts/{account_id}/game/{game_id}/review.pgn")
+def game_review_pgn(account_id: int, game_id: str, user: dict = Depends(current_user)) -> Response:
+    """The reviewed game as an annotated PGN: !, ?, ?? marks, the engine's evaluations and better moves (opens in any chess app)."""
+    acct = owned_account(account_id, user)
+    have = review_mod.load(store, player_key(acct), game_id)
+    if not have:
+        raise HTTPException(404, "Review this game first.")
+    rep = have["report"]
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{rep.get('white') or 'white'}-vs-{rep.get('black') or 'black'}")[:60]
+    return Response(review_mod.annotated_pgn(rep), media_type="application/x-chess-pgn",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-review.pgn"'})
+
+
+# ---- "Think here": recognising when a position needs a long think ------------------------------------------
+class ThinkCall(BaseModel):
+    call: str = Field(..., pattern="^(think|play)$")
+
+
+class ThinkMove(BaseModel):
+    move: str = Field("", max_length=10)
+    practice: bool = False
+    reveal: bool = False  # "show the move": counts as not found
+
+
+@app.get("/api/accounts/{account_id}/think")
+def think_status(account_id: int, user: dict = Depends(current_user)) -> dict:
+    acct = owned_account(account_id, user)
+    key = player_key(acct)
+    games = games_or_404(acct)
+    scanned = think_mod.scanned_ids(store, key)
+    cap = plan_of(user).get("think_games", 0)
+    waiting = len(think_mod.pick_unscanned(games, scanned, 10 ** 6))
+    rows = think_mod.moments(store, key)  # read once for the stats and the drill count
+    return {"stats": think_mod.stats(store, key, rows), "scanned": len(scanned), "clock_games": think_mod.clock_games(games), "games": len(games),
+            "cap": cap, "can_scan": max(0, min(cap - len(scanned), waiting)), "due": len(think_mod.drill(store, key, 500, rows)),
+            "job_id": _active_job("think", account_id, user), "paused": not switches.is_on(store, "think")}
+
+
+@app.post("/api/accounts/{account_id}/think/scan")
+def think_scan(account_id: int, user: dict = Depends(verified_user)) -> dict:
+    if not switches.is_on(store, "think"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["think"])
+    acct = owned_account(account_id, user)
+    key = player_key(acct)
+    games = games_or_404(acct)
+    active = _active_job("think", account_id, user)
+    if active:
+        return {"job_id": active, "message": "Already scanning."}
+    scanned = think_mod.scanned_ids(store, key)
+    cap = plan_of(user).get("think_games", 0)
+    waiting = len(think_mod.pick_unscanned(games, scanned, 10 ** 6))
+    budget = max(0, min(cap - len(scanned), waiting))
+    if not budget:
+        msg = ("None of your games have clock times. Games from Lichess and Chess.com do; for PGN files, export them with clocks."
+               if not think_mod.clock_games(games) else
+               "Every game with clock times is scanned already. New games are added after your next sync." if waiting == 0 else
+               f"Your plan scans up to {cap} games." + ("" if is_pro(user) else " Pro scans up to 500."))
+        return {"job_id": None, "message": msg}
+    job_id = jobs.submit("think", {"budget": budget, "key": f"think:{account_id}"}, user["id"], account_id)
+    minutes = max(1, round(budget * 0.8 / 60))
+    return {"job_id": job_id, "message": f"Timing your moves in {budget} games (about {minutes} minute{'s' if minutes != 1 else ''})."}
+
+
+@app.get("/api/accounts/{account_id}/think/drill")
+def think_drill(account_id: int, limit: int = 20, user: dict = Depends(current_user)) -> list[dict]:
+    acct = owned_account(account_id, user)
+    return think_mod.drill(store, player_key(acct), max(1, min(limit, 50)))
+
+
+def _owned_think(item_id: int, user: dict) -> dict:
+    r = think_mod.get(store, item_id)
+    if not r or r["username"] not in {player_key(a) for a in store.accounts(user["id"])}:
+        raise HTTPException(404, "No such position.")
+    key = f"user:{user['id']}"
+    if think_limiter.blocked(key):
+        raise HTTPException(429, "That's a lot of answers this hour. Take a short break.")
+    think_limiter.fail(key)
+    return r
+
+
+@app.post("/api/think/{item_id}/call")
+def think_call(item_id: int, body: ThinkCall, user: dict = Depends(current_user)) -> dict:
+    r = _owned_think(item_id, user)
+    tc = r["time_class"] or "other"
+    return think_mod.call(store, r, body.call, {tc: think_mod.median_for(store, r["username"], r["time_class"])})
+
+
+@app.post("/api/think/{item_id}/move")
+def think_move(item_id: int, body: ThinkMove, user: dict = Depends(current_user)) -> dict:
+    r = _owned_think(item_id, user)
+    if not r["critical"]:
+        raise HTTPException(400, "This position was routine: there's no single move to find.")
+    try:
+        return think_mod.move(store, r, body.move, body.practice, state["engine"], reveal=body.reveal)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+# ---- scoresheet scanner: an over-the-board game from a photo or typed moves ----------------------------------
+class ScanDecode(BaseModel):
+    text: str | None = Field(None, max_length=20_000)
+    tokens: list[list[str]] | None = Field(None, max_length=400)
+    priors: list[list[float]] | None = Field(None, max_length=400)  # each reading's weight, as the photo step returned them
+    locked: dict[str, str] = Field(default_factory=dict, max_length=400)  # sheet entry (token index) -> the move you confirmed (UCI)
+    language: str = Field("auto", pattern="^(auto|en|de|fr|es|pt|nl|ru)$")
+
+
+class ScanSave(BaseModel):
+    moves: list[str] = Field(..., min_length=1, max_length=400)
+    color: str = Field(..., pattern="^(white|black)$")
+    result: str = Field(..., pattern=r"^(1-0|0-1|1/2-1/2)$")
+    white: str = Field("", max_length=60)
+    black: str = Field("", max_length=60)
+    date: str = Field("", max_length=20)
+    event: str = Field("", max_length=60)
+    round: str = Field("", max_length=20)
+    target: str = Field("games", pattern="^(games|library|both)$")
+    account_id: int | None = None  # one of your ChessBase / PGN accounts
+    name: str | None = Field(None, max_length=60)  # or your name as on the sheet, for a new over-the-board account
+
+
+def _clean_tokens(tokens: list[list[str]]) -> list[list[str]]:
+    out = []
+    for alts in tokens[:scoresheet.MAX_PLIES]:
+        clean = [str(t).strip()[:16] for t in (alts or [])[:4] if isinstance(t, str)]
+        out.append(clean or [""])
+    return out
+
+
+@app.get("/api/scan")
+def scan_info(user: dict = Depends(current_user)) -> dict:
+    readers = scoresheet.vision_backends(settings)
+    per_day = plan_of(user).get("scans_per_day", 0)
+    return {"photo": bool(readers), "model": " + ".join(b.label for b in readers) or None, "readers": len(readers), "per_day": per_day,
+            "left_today": max(0, per_day - store.usage_today(user["id"], "scan")), "paused": not switches.is_on(store, "scanner"),
+            "languages": scoresheet.LANG_NAMES, "library": has_feature(user, "scout"),
+            "pgn_accounts": [{"id": a["id"], "handle": a["handle"]} for a in store.accounts(user["id"])
+                             if a["platform"] == "pgn" and (a.get("role") or "own") == "own"]}
+
+
+@app.post("/api/scan/photo")
+async def scan_photo(file: UploadFile = File(...), left: UploadFile | None = File(None), right: UploadFile | None = File(None),
+                     user: dict = Depends(verified_user)) -> dict:
+    """Read a scoresheet photo (the flattened sheet, plus zoomed crops of its two halves when the browser made them):
+    every configured reader reads it, the readings are merged, unclear moves get a second multiple-choice look,
+    and the game is decoded with the rules of chess and a human-move prior. The photos are never stored."""
+    if not switches.is_on(store, "scanner"):
+        raise HTTPException(503, switches.PAUSED_MESSAGES["scanner"])
+    readers = scoresheet.vision_backends(settings)
+    if not readers:
+        raise HTTPException(400, "Reading photos isn't set up on this server yet. Type the moves instead: any language works.")
+    per_day = plan_of(user).get("scans_per_day", 0)
+    if store.usage_today(user["id"], "scan") >= per_day:
+        raise HTTPException(429, {"message": f"You've read today's {per_day} scoresheet photo{'s' if per_day != 1 else ''}. Typing the moves "
+                                             "still works." + ("" if is_pro(user) else " Pro reads 30 a day."), "upgrade": not is_pro(user)})
+    budget = plan_of(user).get("ai_tokens_per_day", 0)
+    if budget and store.usage_today(user["id"], "ai_tokens") >= budget:
+        raise HTTPException(429, "You've used today's AI allowance. Type the moves instead, or scan again tomorrow.")
+    key = f"user:{user['id']}"
+    if scan_limiter.blocked(key):
+        raise HTTPException(429, "That's a lot of photos this hour. Try again in a little while.")
+    images = []
+    for up in (file, left, right):
+        if up is None:
+            continue
+        data = await up.read(scoresheet.MAX_IMAGE_BYTES + 1)
+        if len(data) > scoresheet.MAX_IMAGE_BYTES:
+            raise HTTPException(413, "That photo is too large (6 MB at most).")
+        if not scoresheet.image_type(data):
+            raise HTTPException(400, "Upload a JPEG, PNG or WebP photo of the scoresheet.")
+        images.append(data)
+    scan_limiter.fail(key)
+    try:
+        out = await run_in_threadpool(scoresheet.read_photo, images, readers, state["engine"])
+    except scoresheet.VisionError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    store.bump_usage(user["id"], "scan")
+    if out["used"]:
+        store.bump_usage(user["id"], "ai_tokens", out["used"])
+    if not out["tokens"] or out["decoded"] is None:
+        raise HTTPException(400, "No moves found on that photo. Make sure the whole sheet is in the picture, flat and in focus.")
+    return {"sheet": out["sheet"], "tokens": out["tokens"], "priors": out["priors"], "decoded": out["decoded"].to_dict(),
+            "readers": out["readers"], "checked": out["checked"], "model": " + ".join(out["readers"])}
+
+
+@app.post("/api/scan/decode")
+def scan_decode(body: ScanDecode, user: dict = Depends(current_user)) -> dict:
+    """Typed moves (any language), or a photo's readings after you confirmed some moves -> the most likely legal game."""
+    key = f"user:{user['id']}"
+    if decode_limiter.blocked(key):
+        raise HTTPException(429, "That's a lot of decoding this hour. Take a short break.")
+    decode_limiter.fail(key)
+    tokens = _clean_tokens(body.tokens) if body.tokens else scoresheet.tokens_from_text(body.text or "")
+    if not any(t for alts in tokens for t in alts):
+        raise HTTPException(400, "Type some moves first, e.g. 1. e4 e5 2. Nf3 (or 2. Sf3 in German).")
+    locked = {int(k): v for k, v in body.locked.items() if k.isdigit() and re.fullmatch(r"[a-h][1-8][a-h][1-8][qrbn]?", v or "")}
+    priors = None
+    if body.tokens and body.priors and len(body.priors) == len(tokens):
+        priors = [[max(-5.0, min(2.0, float(x))) for x in row[:4]] for row in body.priors]
+    return {"tokens": tokens, "priors": priors, "decoded": scoresheet.decode(tokens, locked, body.language, priors=priors).to_dict()}
+
+
+@app.post("/api/scan/save")
+def scan_save(body: ScanSave, user: dict = Depends(verified_user)) -> dict:
+    """Save the confirmed game: to your over-the-board account (analysed like any other game), and/or to your
+    Opponent Library under your opponent's name (Pro)."""
+    imports_allowed()
+    if len(body.moves) < 10:
+        raise HTTPException(400, "Games shorter than five moves each aren't analysed.")
+    mine_header, opp_header = (body.white, body.black) if body.color == "white" else (body.black, body.white)
+    out: dict = {}
+    acct = None
+    if body.target in ("games", "both"):
+        if body.account_id is not None:
+            acct = owned_account(body.account_id, user)
+            if acct["platform"] != "pgn":
+                raise HTTPException(400, "Choose one of your ChessBase / PGN accounts.")
+        else:
+            try:
+                name = validate_pgn_name(body.name or mine_header)
+            except GameImportError as exc:
+                raise HTTPException(400, "Enter your name as you'd like it on the game (2-60 characters).") from exc
+            acct = next((a for a in store.accounts(user["id"]) if a["platform"] == "pgn" and a["handle"].lower() == name.lower()), None)
+            if acct is None:
+                own = [a for a in store.accounts(user["id"]) if (a.get("role") or "own") == "own"]
+                if len(own) >= plan_of(user)["max_accounts"]:
+                    raise HTTPException(402, {"message": f"Your plan allows {plan_of(user)['max_accounts']} linked accounts. Save to an existing "
+                                                         "ChessBase / PGN account, or remove one.", "upgrade": not is_pro(user)})
+                acct = store.add_account(user["id"], "pgn", name)
+                audit(user, "account_linked", f"pgn:{name}", via="scoresheet")
+    me_name = acct["handle"] if acct else (body.name or mine_header or "Me")
+    opp_name = opp_header or "Opponent"
+    white, black = (me_name, opp_name) if body.color == "white" else (opp_name, me_name)
+    try:
+        pgn = scoresheet.build_pgn(body.moves, white, black, body.result, body.date, body.event, body.round)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if acct is not None:
+        out.update(_start_import(user, acct, max_games=games_cap(user), pgn=pgn))
+        out["account_id"] = acct["id"]
+        with contextlib.suppress(GameImportError, IndexError):
+            out["game_id"] = parse_pgn(pgn, acct["handle"])[0].game_id  # so the page can open the game's report card
+    if body.target in ("library", "both"):
+        require_feature(user, "scout")
+        try:
+            opp = validate_pgn_name(opp_header)
+            recs = parse_pgn(pgn, opp)
+        except GameImportError as exc:
+            raise HTTPException(400, "Enter your opponent's name to save the game in your Opponent Library.") from exc
+        player = library.get_or_create_player("pgn", opp, owner_id=user["id"])
+        _library_room(user, player["id"])
+        out["library_new"] = library.add_games(player["id"], recs, requested=None)
+        library.save(user["id"], player["id"])
+        out["library_player"] = player["id"]
+    audit(user, "scoresheet_saved", body.target, moves=len(body.moves))
+    out["pgn"] = pgn
+    return out
 
 
 # ---- file upload (ChessBase / any PGN) -------------------------------------------------------
@@ -1889,6 +2360,7 @@ def public_config() -> dict:
         "require_terms": settings.require_terms,
         "preview_games": settings.preview_games,
         "event_pass_days": EVENT_PASS_DAYS,
+        "scanner_photo": scoresheet.vision_backend(settings) is not None,
     }
 
 

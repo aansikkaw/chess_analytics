@@ -165,6 +165,32 @@ Events sent: Preview started/done, Signup, Login, Account linked, Sync started, 
 attempt, Upgrade request, Scout report, DNA shared. Never emails or usernames. The page's Content
 Security Policy only allows the analytics host you configured.
 
+## 7b. Puzzle bank and scoresheet photos (v1.1)
+
+* **Puzzle bank:** load Lichess's puzzle database once (about 300 MB to download; keeps 200,000 puzzles):
+  `docker compose exec -u root web pip install zstandard`, then
+  `docker compose exec web python scripts/import_puzzles.py --download`.
+  Optionally prepare puzzles ahead of time so first predictions are instant:
+  `docker compose exec worker python scripts/import_puzzles.py --annotate 5000 --around 1700` (repeat for
+  other levels). Otherwise they're prepared on demand around each player's level.
+* **Scoresheet photos:** set `VISION_BASE_URL`, `VISION_MODEL` and `VISION_API_KEY` for any OpenAI-compatible
+  vision model, or rely on `ANTHROPIC_API_KEY`, or on your Groq key (it uses Groq's vision model). Without
+  any of these, the scanner still works by typing the moves. Photos count toward each user's daily AI
+  budget and are never stored.
+
+## 7c. Game report cards and a second photo reader (v1.2)
+
+* **Report cards** need nothing new: they use Stockfish on the worker and, for the written review, the
+  coach's model (`LLM_*` or `ANTHROPIC_API_KEY`). `REVIEW_DEPTH` (default 14) sets the engine depth. A
+  40-move game takes 10–20 seconds of one worker at depth 14. Lower it to 12 on a small server.
+* **A second photo reader** (optional, better accuracy): set `VISION2_MODEL`, `VISION2_BASE_URL` and
+  `VISION2_API_KEY` to another OpenAI-compatible vision model. For example, Gemini at
+  `https://generativelanguage.googleapis.com/v1beta/openai` with a Google AI Studio key, or OpenAI at
+  `https://api.openai.com/v1`. Each photo is then read twice and the readings are merged. Each photo also
+  gets one short follow-up request about the unclear moves. Expect about 2–3× the tokens of one reading.
+* **No new data to download:** the opening names (`app/data/openings.tsv`, Lichess's CC0 list) ship with
+  the app.
+
 ## 8. Capacity
 
 * `MAX_CONCURRENT_IMPORTS` = worker threads (about one per 2 cores). Imports run in chunks of

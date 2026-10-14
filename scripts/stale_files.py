@@ -20,6 +20,7 @@ RELEASE = set("""
 .github/dependabot.yml
 .github/workflows/ci.yml
 .gitignore
+CLAUDE.md
 DEPLOY.md
 Dockerfile
 README.md
@@ -32,6 +33,7 @@ app/auth.py
 app/backup.py
 app/coach.py
 app/config.py
+app/data/openings.tsv
 app/digest.py
 app/engine.py
 app/games.py
@@ -58,13 +60,19 @@ app/mailer.py
 app/main.py
 app/observability.py
 app/okf.py
+app/openings.py
 app/plans.py
 app/player_bundle.py
+app/predict.py
 app/prep.py
 app/profile.py
 app/progress.py
+app/puzzlebank.py
 app/repertoire.py
+app/review.py
+app/review_ai.py
 app/scheduler.py
+app/scoresheet.py
 app/scout.py
 app/sources.py
 app/static/app.css
@@ -89,6 +97,7 @@ app/static/js/dna.js
 app/static/js/landing.js
 app/static/js/main.js
 app/static/js/plans.js
+app/static/js/sheetcv.js
 app/static/js/shell.js
 app/static/js/status.js
 app/static/js/support.js
@@ -96,8 +105,13 @@ app/static/js/views/coach.js
 app/static/js/views/common.js
 app/static/js/views/diagnose.js
 app/static/js/views/library.js
+app/static/js/views/predict.js
 app/static/js/views/prepare.js
+app/static/js/views/puzzles.js
+app/static/js/views/report.js
+app/static/js/views/scan.js
 app/static/js/views/students.js
+app/static/js/views/think.js
 app/static/js/views/train.js
 app/static/js/views/twin.js
 app/static/manifest.webmanifest
@@ -123,6 +137,7 @@ app/status.py
 app/store.py
 app/switches.py
 app/sync.py
+app/think.py
 app/twin.py
 app/worker.py
 deploy/.env.example
@@ -139,10 +154,13 @@ requirements-prod.txt
 requirements.lock
 requirements.txt
 sample_data/demo_games.pgn
+sample_data/puzzles_sample.csv
 scripts/admin.py
 scripts/backup.py
 scripts/coach_check.py
+scripts/import_puzzles.py
 scripts/make_demo_pgn.py
+scripts/make_puzzle_sample.py
 scripts/setup_ollama.sh
 scripts/stale_files.py
 scripts/start_ollama.sh
@@ -158,10 +176,14 @@ tests/test_jobs.py
 tests/test_library.py
 tests/test_okf.py
 tests/test_ops.py
+tests/test_predict.py
 tests/test_prep.py
 tests/test_pro.py
 tests/test_production.py
+tests/test_review.py
+tests/test_scoresheet.py
 tests/test_sources.py
+tests/test_think.py
 tests/test_twin.py
 """.split())
 

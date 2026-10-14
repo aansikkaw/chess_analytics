@@ -84,6 +84,8 @@ export async function openGame(gameId, accountId = S.accountId, url = null) {
       : el("p", { class: "small muted" }, "Your moves are in blue ink. ", el("span", { class: "hand", style: { fontSize: "1.15rem", margin: "0 3px 0 2px" }, text: "?" }),
         "\u00a0marks a mistake; click it to see the engine's move."),
     sheet, note,
+    !g.library && accountId ? el("a", { class: "btn small", href: `#/report/${accountId}/${encodeURIComponent(g.game_id)}`,
+      text: "Full report card", onclick: () => dlg.close() }) : null,
     jump ? el("button", { class: "btn quiet small", type: "button", text: "Jump to my costliest mistake", onclick: () => go(jump.ply + 1) }) : null,
     g.pgn ? el("button", { class: "btn quiet small", type: "button", text: "Copy PGN", onclick: async () => {
       try { await navigator.clipboard.writeText(g.pgn); toast("PGN copied. Paste it into ChessBase or any chess app."); }
@@ -249,4 +251,29 @@ export function areaTabs(area, current, items) {
   return el("nav", { class: "tabs", "aria-label": "Sections" }, ...items.map(([key, label, pro]) =>
     el("a", { href: `#/${area}${key ? `/${key}` : ""}`, "aria-current": (current || "") === key ? "page" : null },
       label, pro ? el("span", { class: "tag pro", text: "Pro" }) : null)));
+}
+
+/** Show a background job's progress in `out` until it finishes; then call done(job) (or show its error). */
+export async function followJob(out, jobId, done) {
+  const bar = el("div", { class: "syncbar twin-bar" }, el("i"));
+  const label = el("p", { class: "small muted", text: "Starting…" });
+  out.replaceChildren(label, bar);
+  for (;;) {
+    let j;
+    try { j = await api(`/api/jobs/${jobId}`); } catch (e) { out.replaceChildren(el("p", { class: "err", text: e.message })); return; }
+    if (!out.isConnected) return; // the page changed: stop polling
+    if (j.state === "done") { out.replaceChildren(); done(j); return; }
+    if (j.state === "error") { out.replaceChildren(el("p", { class: "err", text: j.error || "That didn't work. Please try again." })); return; }
+    label.textContent = j.state === "queued" ? `${j.stage && j.done ? `${j.stage}. ` : ""}Waiting for the engine${j.position ? ` (${j.position} ahead)` : ""}…`
+      : `${j.stage || "Working"}${j.total && !/\d/.test(j.stage || "") ? `: ${j.done} of ${j.total}` : ""}…`;
+    bar.firstChild.style.width = j.total ? `${Math.round((100 * j.done) / j.total)}%` : "8%";
+    await new Promise((r) => setTimeout(r, 1300));
+  }
+}
+
+/** "2m 05s" or "42s". */
+export function secs(s) {
+  if (s == null) return "–";
+  const t = Math.round(s);
+  return t >= 60 ? `${Math.floor(t / 60)}m ${String(t % 60).padStart(2, "0")}s` : `${t}s`;
 }

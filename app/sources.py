@@ -17,10 +17,12 @@ Every function takes an optional `httpx.Client` so tests can inject a mock.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from collections.abc import Iterable
 from contextlib import contextmanager, nullcontext, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -270,6 +272,84 @@ def _walk_archives(c: httpx.Client, username: str, max_games: int, wanted: set, 
         if stop:
             break
     return "\n\n".join(pgns)
+
+
+# ---- full history (the Opponent Library's "Download full history") ----------------------------------
+_UTC_DATE = re.compile(r'\[UTCDate "(\d{4})\.(\d{2})\.(\d{2})"\]')
+_UTC_TIME = re.compile(r'\[UTCTime "(\d{2}):(\d{2}):(\d{2})"\]')
+
+
+def _oldest_ms(pgn: str) -> int | None:
+    """The earliest UTCDate + UTCTime in a Lichess PGN export, in milliseconds."""
+    dates, times = _UTC_DATE.findall(pgn), _UTC_TIME.findall(pgn)
+    stamps = []
+    for d, t in zip(dates, times, strict=False):
+        try:
+            stamps.append(int(datetime(*map(int, d), *map(int, t), tzinfo=UTC).timestamp() * 1000))
+        except ValueError:
+            continue
+    return min(stamps) if stamps else None
+
+
+def lichess_history_page(username: str, max_games: int, until_ms: int | None = None,
+                         http: httpx.Client | None = None) -> tuple[str, int, int | None]:
+    """One page of a player's whole rated Lichess history, newest first.
+    Returns (pgn, games in the page, the oldest game's time in ms). Ask again with until_ms = oldest - 1."""
+    username = validate_username(username)
+    params = {"max": max_games, "rated": "true", "perfType": ",".join(TIME_CLASSES), "clocks": "true", "opening": "true",
+              "evals": "false"}
+    if until_ms:
+        params["until"] = until_ms
+    c = _client(http)
+    try:
+        with _serial("lichess"):
+            r = _get(c, f"{LICHESS}/api/games/user/{username}", params=params, headers={"Accept": "application/x-chess-pgn"})
+            if r.status_code == 404:
+                raise GameImportError(f"No Lichess account called '{username}'.")
+            _raise_for(r, "Lichess")
+            pgn = r.text
+    except httpx.HTTPError as exc:
+        raise network_error("Lichess", exc) from exc
+    finally:
+        if http is None:
+            c.close()
+    return pgn, pgn.count("[Event "), _oldest_ms(pgn)
+
+
+def chesscom_archives(username: str, http: httpx.Client | None = None) -> list[str]:
+    """Every monthly archive URL for a Chess.com player, newest first."""
+    username = validate_username(username).lower()
+    c = _client(http)
+    try:
+        with _serial("chesscom"):
+            r = _get(c, f"{CHESSCOM}/player/{username}/games/archives")
+            if r.status_code in (404, 410):
+                raise GameImportError(f"No Chess.com account called '{username}'.")
+            _raise_for(r, "Chess.com")
+            return list(reversed(r.json().get("archives", [])))
+    except httpx.HTTPError as exc:
+        raise network_error("Chess.com", exc) from exc
+    finally:
+        if http is None:
+            c.close()
+
+
+def chesscom_month(url: str, http: httpx.Client | None = None) -> str:
+    """One monthly archive: the PGNs of its rated standard games (every time control), newest first."""
+    if not url.startswith(CHESSCOM + "/player/"):
+        raise GameImportError("That isn't a Chess.com archive address.")
+    c = _client(http)
+    try:
+        with _serial("chesscom"):
+            r = _get(c, url)
+            _raise_for(r, "Chess.com")
+            games = sorted(r.json().get("games", []), key=lambda g: g.get("end_time", 0), reverse=True)
+    except httpx.HTTPError as exc:
+        raise network_error("Chess.com", exc) from exc
+    finally:
+        if http is None:
+            c.close()
+    return "\n\n".join(g["pgn"] for g in games if g.get("rules") == "chess" and g.get("rated") and g.get("pgn"))
 
 
 def fetch_games(platform: str, username: str, max_games: int, time_classes=None, since_ms: int | None = None,

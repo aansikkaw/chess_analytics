@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS jobs_account ON jobs (account_id, state);
 """
 
 # Lower runs first.
-PRIORITY = {"preview": 1, "prep": 3, "import": 5, "autosync": 8}
+PRIORITY = {"preview": 1, "prep": 3, "review": 4, "import": 5, "predict": 5, "twin": 6, "think": 6, "library_full": 7, "autosync": 8}
 STALE_AFTER_S = 300  # a running job with no heartbeat for this long is assumed dead and re-queued
 KEEP_FINISHED_DAYS = 14
 ACTIVE = ("queued", "running")

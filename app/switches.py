@@ -20,6 +20,10 @@ SWITCHES: dict[str, str] = {
     "chesscom": "Fetching games from Chess.com",
     "emails": "Sending email (when off, emails are saved to outbox/)",
     "twin": "Opponent Twin practice games and builds",
+    "predicted": "Twin-predicted puzzles (new predictions)",
+    "think": "The \"Think here\" trainer's scans",
+    "scanner": "Scoresheet photo reading (typing moves still works)",
+    "review": "Game report cards (new reviews)",
 }
 PAUSED_MESSAGES = {
     "ai_coach": "The AI coach is paused for maintenance, so the built-in coach is answering.",
@@ -27,6 +31,10 @@ PAUSED_MESSAGES = {
     "signups": "New accounts are paused for a short while. Please try again later.",
     "chesscom": "Chess.com syncing is paused for now. Lichess and PGN uploads still work.",
     "twin": "Opponent Twins are paused for maintenance. Your library and reports still work.",
+    "predicted": "New predicted puzzles are paused for a short while. Puzzles already in your deck still work.",
+    "think": "Scanning games for critical moments is paused for a short while. Your drill still works.",
+    "scanner": "Reading scoresheet photos is paused for a short while. You can still type the moves.",
+    "review": "New game reviews are paused for a short while. Reviews you already have still open.",
 }
 CACHE_S = 5.0
 _cache: dict[str, tuple[float, bool]] = {}

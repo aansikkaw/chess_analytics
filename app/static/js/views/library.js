@@ -318,6 +318,7 @@ async function playerTab(content, body) {
     catch (ex) { toast(ex.message); }
   } });
   const report = el("div", { class: "stack-lg" }, el("p", { class: "muted", text: "Building the report from saved games…" }));
+  const full = p.platform === "pgn" ? null : fullHistoryBox(p, body);
   content.replaceChildren(
     el("section", { class: "sheet stack" },
       el("div", { class: "row between" }, el("div", {}, el("h2", { text: p.handle }),
@@ -329,13 +330,40 @@ async function playerTab(content, body) {
         el("button", { class: "btn quiet small", type: "button", text: "Explore only this player", onclick: () => { L.selected = new Set([p.id]); L.tab = "explore"; render(body); } }),
         el("button", { class: "btn quiet small", type: "button", text: "Their games", onclick: () => { L.selected = new Set([p.id]); L.tab = "games"; render(body); } }),
         el("button", { class: "btn small", type: "button", text: twin.hasGame(p.id) ? "Continue your game vs their Twin" : "Practise against their Twin",
-          onclick: () => { L.tab = "twin"; render(body); } }))),
+          onclick: () => { L.tab = "twin"; render(body); } })),
+      full),
     report);
   const a = account();
   try {
     const r = await api(`/api/library/${p.id}/report?games=500${a && a.games ? `&account_id=${a.id}` : ""}`);
     scoutReport(report, r);
   } catch (e) { fill(report, el("p", { class: "err", text: e.message })); }
+}
+
+// Their whole career: a background download, page by page, that the Twin and the Explorer then use.
+function fullHistoryBox(p, body) {
+  const box = el("div", { class: "full-history" });
+  const out = el("div", { class: "stack" });
+  const draw = (st) => {
+    const btn = el("button", { class: "btn quiet small", type: "button", text: `Download full history (up to ${st.cap.toLocaleString()} games)`,
+      onclick: async () => {
+        btn.disabled = true;
+        try {
+          const r = await post(`/api/library/${p.id}/full`);
+          toast(r.message);
+          if (r.job_id) twin.watchJob(out, r.job_id, () => { toast(`${p.handle}'s full history is saved.`); render(body); });
+          else btn.disabled = false;
+        } catch (e) { toast(e.message); btn.disabled = false; }
+      } });
+    fill(box, el("b", { class: "small", text: "Their whole career" }),
+      el("p", { class: "small muted", text: st.full_at
+        ? `Full history downloaded ${new Date(st.full_at * 1000).toLocaleDateString()}: ${st.games.toLocaleString()} games. Update adds anything newer.`
+        : `${st.games.toLocaleString()} games saved so far. Downloading their full history gives the Explorer and their Twin far more to learn from (it runs in the background; big histories take a few minutes).` }),
+      st.full_at ? null : el("div", { class: "row" }, btn), out);
+    if (st.job_id) { btn.disabled = true; twin.watchJob(out, st.job_id, () => render(body)); }
+  };
+  api(`/api/library/${p.id}/full`).then(draw).catch(() => box.remove());
+  return box;
 }
 
 /** Scout tab helper: the most recently opened saved players, as one-click chips. */
