@@ -14,7 +14,7 @@ python -m pytest -q                          # full suite; engine tests skip if 
 python -m pytest tests/test_twin.py -q       # one file
 python -m pytest tests/test_api.py::test_name -q
 ruff check app scripts tests                 # lint (line length 165)
-for f in app/static/js/*.js app/static/js/views/*.js app/static/sw.js; do node --check "$f"; done   # JS syntax check, as CI does (needs Node, which the devcontainer doesn't install)
+for f in app/static/js/*.js app/static/js/views/*.js app/static/sw.js; do node --check "$f"; done   # JS syntax check, as CI does (Node comes from the devcontainer's Node feature)
 
 python scripts/admin.py ...                  # users, grant/revoke plans, kill switches, audit log
 python -m app.worker                         # separate job worker (with JOB_MODE=external)
