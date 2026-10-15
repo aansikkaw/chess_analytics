@@ -55,6 +55,9 @@ CREATE INDEX IF NOT EXISTS jobs_account ON jobs (account_id, state);
 """
 
 # Lower runs first.
+# Short jobs a user is sitting and waiting for. One may run beside the same user's background job
+# (an import can take many minutes), but a user still never runs two of these, or two background jobs, at once.
+INTERACTIVE = ("review",)
 PRIORITY = {"preview": 1, "prep": 3, "review": 4, "import": 5, "predict": 5, "twin": 6, "think": 6, "library_full": 7, "autosync": 8}
 STALE_AFTER_S = 300  # a running job with no heartbeat for this long is assumed dead and re-queued
 KEEP_FINISHED_DAYS = 14
@@ -176,9 +179,11 @@ class JobQueue:
 
     # ---- workers ----------------------------------------------------------------
     def claim(self, worker: str, kinds: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> dict | None:
-        """Atomically take the next job. A user with a running job waits, so one person can't fill every worker."""
+        """Atomically take the next job. A user with a running job waits, so one person can't fill every worker,
+        except that an INTERACTIVE job may run beside one background job of theirs."""
         now = time.time()
         kind_sql = f" AND j.kind IN ({','.join('?' * len(kinds))})" if kinds else ""
+        inter = ",".join("?" * len(INTERACTIVE))
         if exclude:
             kind_sql += f" AND j.kind NOT IN ({','.join('?' * len(exclude))})"
         with self._conn() as c:
@@ -186,9 +191,10 @@ class JobQueue:
             try:
                 r = c.execute(
                     "SELECT * FROM jobs j WHERE j.state = 'queued' AND (j.not_before IS NULL OR j.not_before <= ?)" + kind_sql +
-                    " AND (j.user_id IS NULL OR NOT EXISTS (SELECT 1 FROM jobs r WHERE r.state = 'running' AND r.user_id = j.user_id))"
+                    " AND (j.user_id IS NULL OR NOT EXISTS (SELECT 1 FROM jobs r WHERE r.state = 'running' AND r.user_id = j.user_id"
+                    f" AND (j.kind NOT IN ({inter}) OR r.kind IN ({inter}))))"
                     " ORDER BY j.priority, j.created_at LIMIT 1",
-                    (now, *(kinds or ()), *exclude),
+                    (now, *(kinds or ()), *exclude, *INTERACTIVE, *INTERACTIVE),
                 ).fetchone()
                 if r is None:
                     c.execute("COMMIT")

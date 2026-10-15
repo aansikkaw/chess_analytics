@@ -1,4 +1,4 @@
-// Signed-in shell: routing between the four jobs, the account switcher and sync, the account panel, banners.
+// Signed-in shell: routing between the main sections, the account switcher and sync, the account panel, banners.
 
 import { $, $$, PLATFORM, S, account, ago, api, del, el, fill, isCoach, isPro, openDialog, patch, post, showErr, sleep, store, toast, track, upload } from "./core.js";
 import * as diagnose from "./views/diagnose.js";

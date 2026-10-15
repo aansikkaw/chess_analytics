@@ -29,6 +29,21 @@ def test_one_running_job_per_user_and_priority(q):
     assert q.claim("w4")["id"] == p  # previews jump the line
 
 
+def test_report_card_does_not_wait_for_the_same_users_import(q):
+    imp = q.enqueue("import", {}, user_id=1)
+    assert q.claim("w1")["id"] == imp
+    more = q.enqueue("import", {}, user_id=1)
+    r1 = q.enqueue("review", {}, user_id=1)
+    r2 = q.enqueue("review", {}, user_id=1)
+    assert q.claim("w2")["id"] == r1  # a report card starts while the user's long import is running
+    assert q.claim("w3") is None  # but never two report cards at once, and no second background job
+    q.finish(r1)
+    assert q.claim("w2")["id"] == r2
+    q.finish(r2)
+    q.finish(imp)
+    assert q.claim("w1")["id"] == more
+
+
 def test_requeue_goes_to_the_back_and_delay_is_respected(q):
     x = q.enqueue("import", {"n": 1}, user_id=1)
     y = q.enqueue("import", {}, user_id=2)

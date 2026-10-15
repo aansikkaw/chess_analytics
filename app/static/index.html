@@ -34,9 +34,13 @@
       <section class="hero">
         <div>
           <h1 class="display">Find the part of your game that's costing you rating.</h1>
-          <p class="lede">Enter your Lichess username. Stockfish checks your recent games and rates you skill by skill: openings, middlegame, endgames, tactics, time, converting and defending.</p>
+          <p class="lede">Enter your Lichess or Chess.com username. Stockfish checks your recent games and rates you skill by skill: openings, middlegame, endgames, tactics, time, converting and defending.</p>
           <form id="previewForm" class="preview-form" novalidate>
-            <label class="label" for="pvUser">Your Lichess username</label>
+            <div class="seg pv-platform" role="group" aria-label="Where you play" id="pvPlatform">
+              <button type="button" data-platform="lichess" aria-pressed="true">Lichess</button>
+              <button type="button" data-platform="chesscom" aria-pressed="false">Chess.com</button>
+            </div>
+            <label class="label" for="pvUser" id="pvLabel">Your Lichess username</label>
             <div class="inline">
               <input id="pvUser" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. aanletsgo" maxlength="30" required>
               <button class="btn" id="pvBtn" type="submit">Diagnose my games</button>
@@ -54,7 +58,7 @@
       <section id="previewOut" class="preview-out" aria-live="polite" hidden></section>
 
       <section id="how" class="lp-section">
-        <h2>Four jobs, one place: your own games.</h2>
+        <h2>Everything here starts from your own games.</h2>
         <p class="lede">Game review explains one game. Plateau Breaker reads all of them, finds the habit that costs you the most, and keeps working on it with you.</p>
         <div class="jobs">
           <div class="job"><h3>Diagnose</h3><p>A rating for each of 7 skills from every move you've played, and the habits behind your losses.</p>

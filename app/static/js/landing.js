@@ -29,6 +29,7 @@ export function initLanding(signedInCallback) {
   const rerender = () => renderPlans($("#lpPlans"), { onChoose: () => openAuth("signup") });
   bindCurrency(rerender);
   rerender();
+  bindPlatform();
   $("#previewForm").addEventListener("submit", (e) => { e.preventDefault(); runPreview(); });
   document.querySelectorAll("[data-auth]").forEach((b) => b.addEventListener("click", () => openAuth(b.dataset.auth)));
   bindAuthForm();
@@ -41,11 +42,30 @@ export function showLanding() {
 }
 
 // ---------------- the instant preview ----------------
+const PLATFORM_NAMES = { lichess: "Lichess", chesscom: "Chess.com" };
+let platform = "lichess";
+
+function bindPlatform() {
+  const host = $("#pvPlatform");
+  // Chess.com can be switched off server-side; then the preview is Lichess only and the choice is hidden.
+  const on = (S.config.platforms || ["lichess"]).includes("chesscom");
+  host.hidden = !on;
+  if (!on) return;
+  for (const b of host.querySelectorAll("[data-platform]")) {
+    b.onclick = () => {
+      platform = b.dataset.platform;
+      for (const o of host.querySelectorAll("[data-platform]")) o.setAttribute("aria-pressed", String(o === b));
+      $("#pvLabel").textContent = `Your ${PLATFORM_NAMES[platform]} username`;
+      $("#pvUser").focus();
+    };
+  }
+}
+
 async function runPreview() {
   const name = $("#pvUser").value.trim();
   const err = $("#pvErr");
   showErr(err, "");
-  if (!name) { showErr(err, "Type your Lichess username first."); $("#pvUser").focus(); return; }
+  if (!name) { showErr(err, `Type your ${PLATFORM_NAMES[platform]} username first.`); $("#pvUser").focus(); return; }
   const btn = $("#pvBtn");
   btn.disabled = true;
   const out = $("#previewOut");
@@ -56,7 +76,7 @@ async function runPreview() {
   out.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
   track("Preview started");
   try {
-    const { job_id } = await post("/api/preview", { username: name, platform: "lichess" });
+    const { job_id } = await post("/api/preview", { username: name, platform });
     let j;
     for (let i = 0; i < 240; i++) {
       j = await api(`/api/preview/${job_id}`);

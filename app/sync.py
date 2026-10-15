@@ -499,7 +499,7 @@ class Importer:
         except RateLimited as exc:
             if job["attempts"] >= MAX_RATE_RETRIES:
                 raise JobError(str(exc)) from exc
-            raise Requeue(delay=65, stage="Lichess is busy; trying again in a minute.") from exc
+            raise Requeue(delay=65, stage=f"{'Chess.com' if p['platform'] == 'chesscom' else 'Lichess'} is busy; trying again in a minute.") from exc
         except GameImportError as exc:
             raise JobError(str(exc)) from exc
         records = sorted(records, key=lambda r: r.played_at, reverse=True)[:n]

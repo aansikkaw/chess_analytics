@@ -6,6 +6,16 @@ import { el, signed, svg } from "./core.js";
 
 const PEN_ELLIPSE = "M6 23 C 4 9, 40 2, 66 4 C 92 6, 99 14, 96 26 C 93 39, 60 45, 34 43 C 12 41, 2 33, 7 20 C 9 15, 15 11, 22 9";
 
+// Matches MIN_MOVES_FOR_CONFIDENCE in app/profile.py.
+const MIN_MOVES = 25;
+
+/** Half-width of the scale in rating points, set by the skills we can actually rate. */
+function scaleMax(dna) {
+  const rated = dna.skills.filter((s) => !s.low_confidence);
+  const offs = (rated.length ? rated : dna.skills).map((s) => Math.abs(s.rating - dna.base_rating));
+  return Math.max(50, Math.ceil(Math.max(...offs, 1) / 25) * 25);
+}
+
 export function weakestSkill(dna) {
   const pool = dna.skills.filter((s) => !s.low_confidence);
   const w = (pool.length ? pool : dna.skills).reduce((a, b) => (b.rating < a.rating ? b : a), dna.skills[0]);
@@ -14,8 +24,7 @@ export function weakestSkill(dna) {
 
 export function renderDNA(host, dna, { annotate = true, animate = false } = {}) {
   const base = dna.base_rating;
-  const offs = dna.skills.map((s) => Math.abs(s.rating - base));
-  const max = Math.max(50, Math.ceil(Math.max(...offs, 1) / 25) * 25);
+  const max = scaleMax(dna);
   const weak = annotate ? weakestSkill(dna) : null;
   const box = el("div", { class: `dna${animate ? " animate" : ""}`, role: "group", "aria-label": `Rating DNA around ${base}` });
   box.append(el("div", { class: "dna-axis", "aria-hidden": "true" }, el("span"),
@@ -24,12 +33,19 @@ export function renderDNA(host, dna, { annotate = true, animate = false } = {}) 
   dna.skills.forEach((s, i) => {
     const off = s.rating - base;
     const pct = Math.min(50, (50 * Math.abs(off)) / max);
-    const row = el("div", { class: `dna-row${weak && weak.key === s.key ? " weakest" : ""}` },
-      el("div", { class: "name" }, s.label, el("small", { text: s.low_confidence ? `${s.moves} moves, low confidence` : `${s.accuracy}% accurate` })),
-      el("div", { class: "dna-track", role: "img", "aria-label": `${s.label}: ${s.rating}, ${signed(off)} against your ${base}` },
-        el("div", { class: "grid" }),
-        el("div", { class: `dna-bar ${off >= 0 ? "up" : "down"}${s.low_confidence ? " low" : ""}`, style: { width: `${pct}%`, "--i": i } })),
-      el("div", { class: "val" }, el("b", { class: "figure", text: String(s.rating) }), el("span", { text: signed(off) })));
+    // Too few moves to rate: no number and no bar, so a guess from a handful of moves can't pass for a finding.
+    const row = s.low_confidence
+      ? el("div", { class: "dna-row unrated" },
+        el("div", { class: "name" }, s.label, el("small", { text: `${s.moves} of ${MIN_MOVES} moves needed` })),
+        el("div", { class: "dna-track", role: "img", "aria-label": `${s.label}: not enough moves to rate yet` },
+          el("div", { class: "grid" }), el("span", { class: "dna-unrated", text: "not enough moves yet" })),
+        el("div", { class: "val" }, el("b", { class: "figure", text: "–" })))
+      : el("div", { class: `dna-row${weak && weak.key === s.key ? " weakest" : ""}` },
+        el("div", { class: "name" }, s.label, el("small", { text: `${s.accuracy}% accurate` })),
+        el("div", { class: "dna-track", role: "img", "aria-label": `${s.label}: ${s.rating}, ${signed(off)} against your ${base}` },
+          el("div", { class: "grid" }),
+          el("div", { class: `dna-bar ${off >= 0 ? "up" : "down"}`, style: { width: `${pct}%`, "--i": i } })),
+        el("div", { class: "val" }, el("b", { class: "figure", text: String(s.rating) }), el("span", { text: signed(off) })));
     if (weak && weak.key === s.key) {
       row.style.marginBottom = "26px";
       const pen = el("div", { class: "pen", "aria-hidden": "true", style: { right: "-12px", top: "-6px", width: "calc(4.6rem + 24px)", height: "50px" } },
@@ -42,8 +58,7 @@ export function renderDNA(host, dna, { annotate = true, animate = false } = {}) 
   });
   host.replaceChildren(box, el("div", { class: "dna-legend" },
     el("span", {}, el("i", { style: { background: "var(--blue)" } }), "above your rating"),
-    el("span", {}, el("i", { style: { background: "var(--red)" } }), "below your rating"),
-    el("span", {}, el("i", { style: { background: "var(--rule-2)" } }), "striped: too few moves to be sure")));
+    el("span", {}, el("i", { style: { background: "var(--red)" } }), "below your rating")));
   return box;
 }
 
@@ -75,18 +90,20 @@ export async function shareCard(dna, handle, platform) {
   }
 
   const x0 = 620, x1 = 1110, mid = (x0 + x1) / 2, top = 96, rowH = 62;
-  const max = Math.max(50, Math.ceil(Math.max(...dna.skills.map((s) => Math.abs(s.rating - dna.base_rating)), 1) / 25) * 25);
+  const max = scaleMax(dna);
   g.strokeStyle = rule; g.lineWidth = 1;
   for (let k = 0; k <= 4; k++) { const x = x0 + ((x1 - x0) * k) / 4; g.beginPath(); g.moveTo(x, top - 10); g.lineTo(x, top + rowH * dna.skills.length); g.stroke(); }
   dna.skills.forEach((s, i) => {
     const y = top + i * rowH;
     const off = s.rating - dna.base_rating;
     const w = ((x1 - x0) / 2) * Math.min(1, Math.abs(off) / max);
-    g.fillStyle = off >= 0 ? blue : red;
-    roundRect(g, off >= 0 ? mid : mid - w, y + 30, Math.max(w, 2), 18, 3); g.fill();
+    if (!s.low_confidence) {
+      g.fillStyle = off >= 0 ? blue : red;
+      roundRect(g, off >= 0 ? mid : mid - w, y + 30, Math.max(w, 2), 18, 3); g.fill();
+    }
     stretch("normal"); g.fillStyle = ink; g.font = '600 21px "Archivo", sans-serif'; g.fillText(s.label, x0, y + 20);
-    stretch("condensed"); g.font = '800 24px "Archivo", sans-serif'; g.textAlign = "right"; g.fillStyle = off < 0 ? red : ink;
-    g.fillText(`${s.rating}`, x1, y + 20); g.textAlign = "left";
+    stretch("condensed"); g.font = '800 24px "Archivo", sans-serif'; g.textAlign = "right"; g.fillStyle = !s.low_confidence && off < 0 ? red : ink;
+    g.fillText(s.low_confidence ? "–" : `${s.rating}`, x1, y + 20); g.textAlign = "left";
   });
   g.fillStyle = ink; g.fillRect(mid - 1, top - 14, 2, rowH * dna.skills.length + 4);
   stretch("normal"); g.fillStyle = muted; g.font = '500 20px "Archivo", sans-serif';
