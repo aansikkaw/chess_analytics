@@ -46,5 +46,6 @@ CI (`.github/workflows/ci.yml`) runs ruff, `node --check`, pytest with real Stoc
 
 - Before saying a task is done, run `python -m pytest -q`, `ruff check .`, and `node --check` on every changed JS file. If one can't run (e.g. Node isn't installed), say so rather than claiming it passed.
 - Never put API keys, passwords or other secrets in code; they come from environment variables (`app/config.py`, `deploy/.env.example`).
+- All UI work follows DESIGN.md.
 - Keep the design our own: don't copy Chess.com's look, layout, assets or wording.
 - Commit with clear messages that say what changed and why.

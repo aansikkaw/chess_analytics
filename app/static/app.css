@@ -1,6 +1,7 @@
 /* Plateau Breaker — "your scoresheet, marked up by a coach".
    Blue ink = you and your moves. Red pen = the coach: weaknesses, corrections, the engine's better move.
-   One family (Archivo, variable width) carries the type; Caveat appears only as the coach's handwriting. */
+   One family (Archivo, variable width) carries the type; IBM Plex Mono sets moves and evaluations;
+   Caveat appears only as the coach's handwriting. Tokens and rules: DESIGN.md. */
 
 @font-face { font-family: "Archivo"; font-style: normal; font-display: swap; font-weight: 100 900; font-stretch: 62% 125%;
   src: url(/static/fonts/archivo-latin-standard-normal.woff2) format("woff2-variations");
@@ -9,86 +10,211 @@
   src: url(/static/fonts/archivo-latin-ext-standard-normal.woff2) format("woff2-variations");
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
 @font-face { font-family: "Caveat"; font-style: normal; font-display: swap; font-weight: 600; src: url(/static/fonts/caveat-latin-600-normal.woff2) format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-display: swap; font-weight: 400; src: url(/static/fonts/ibm-plex-mono-latin-400-normal.woff2) format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-display: swap; font-weight: 600; src: url(/static/fonts/ibm-plex-mono-latin-600-normal.woff2) format("woff2"); }
 @font-face { font-family: "Pieces"; font-display: block; src: url(/static/fonts/chess-pieces.woff2) format("woff2"); }
 
 :root {
+  /* Design tokens. DESIGN.md is the reference for every value here; change both together. */
   color-scheme: light;
-  --paper: #eef1f5;
-  --sheet: #ffffff;
-  --ink: #1c2235;
-  --ink-2: #545d73;
-  --ink-3: #8a93a6;
-  --rule: #d8dde6;
-  --rule-2: #bcc3d0;
-  --blue: #2b44c9;
-  --blue-ink: #2033a3;
+
+  /* colour: paper and ink */
+  --paper: #eef0f3;          /* the desk: page background */
+  --sheet: #ffffff;          /* sheets: cards, panels, tables */
+  --sheet-2: #f6f7f9;        /* a quieter sheet: table stripes, inset notes */
+  --ink: #1a1f2b;            /* text and the strongest rules */
+  --ink-2: #545d73;          /* secondary text */
+  --ink-3: #646d84;          /* captions, axis labels (4.5:1 on paper) */
+  --rule: #d8dde6;           /* borders */
+  --rule-2: #bcc3d0;         /* input and control borders */
+  --ruling: #c8d3e6;         /* scoresheet ruling: row lines inside sheets */
+
+  /* colour: meaning */
+  --blue: #2443c4;           /* ballpoint: you, links, primary actions */
+  --blue-ink: #1a3299;       /* hover and pressed blue */
   --blue-wash: #e8ecfc;
-  --red: #c9372c;
+  --on-blue: #ffffff;        /* text on a blue fill */
+  --red: #c8322a;            /* red pen: the coach, errors, losses */
   --red-wash: #fcebe8;
+  --amber: #d9a23a;          /* the move you are looking at; last move */
+  --amber-wash: rgb(217 162 58 / 22%);
   --ok: #2c7a4b;
   --warn: #a8670f;
-  --sq-light: #e4e9f1;
-  --sq-dark: #97a4bc;
+
+  /* colour: board */
+  --board-light: #e4e8ef;
+  --board-dark: #6e7c97;
+  --board-last-light: #eedfa0;
+  --board-last-dark: #a99f70;
+  --board-edge: #1a1f2b;
   --piece-white: #ffffff;
   --piece-black: #1c2235;
-  --shadow: 0 1px 2px rgb(28 34 53 / 6%), 0 8px 28px rgb(28 34 53 / 7%);
-  --r: 10px;
-  --r-sm: 6px;
+  --arrow-you: var(--blue);
+  --arrow-coach: var(--red);
+  --arrow-drawn: #7a8399;
+  --eval-you: var(--blue);
+  --eval-opponent: #d3d8e1;
+
+  /* type */
   --font: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --hand: "Caveat", "Segoe Print", "Bradley Hand", cursive;
+  --text-xs: 0.75rem;        /* 12px: captions, axis labels */
+  --text-sm: 0.875rem;       /* 14px: secondary text, table cells */
+  --text-base: 1rem;         /* 16px: body */
+  --text-md: 1.125rem;       /* 18px: lede, card titles */
+  --text-lg: 1.25rem;        /* 20px: section titles */
+  --text-xl: 1.5rem;         /* 24px: h2 */
+  --text-2xl: 2rem;          /* 32px: h1 */
+  --text-3xl: 2.5rem;        /* 40px: figures */
+  --text-display: clamp(2.3rem, 5.2vw, 3.9rem);
+  --leading-tight: 1.1;
+  --leading: 1.55;
+  --move-size: 0.9375rem;    /* 15px: moves and evals in the mono face */
+
+  /* space: a 4px grid; scoresheet rows are --row tall */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+  --row: 32px;
+
+  /* shape */
+  --radius-board: 2px;
+  --radius-sheet: 4px;
+  --radius-control: 6px;
+  --radius-pill: 999px;
+  --r: var(--radius-sheet);      /* older name, kept for existing components */
+  --r-sm: var(--radius-control); /* older name, kept for existing components */
+
+  /* depth */
+  --shadow-sheet: 0 1px 0 var(--rule), 0 18px 40px -26px rgb(28 34 53 / 38%);
+  --shadow-raised: 0 2px 4px rgb(28 34 53 / 8%), 0 16px 36px rgb(28 34 53 / 16%);
+  --shadow-board: 0 16px 34px -22px rgb(28 34 53 / 50%);
+  --shadow: var(--shadow-sheet);  /* older name, kept for existing components */
+
+  /* motion */
+  --dur-press: 80ms;         /* button press */
+  --dur-fast: 140ms;         /* hover, toggles, focus */
+  --dur-move: 180ms;         /* a piece sliding one move */
+  --dur-panel: 240ms;        /* panels opening, rows expanding */
+  --dur-reveal: 600ms;       /* the one orchestrated reveal on a page (Rating DNA bars) */
+  --ease-out: cubic-bezier(.2, .7, .2, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+
+  /* layout */
   --rail: 208px;
   --top: 60px;
+
+  /* older board names, kept for the Slate board theme */
+  --sq-light: var(--board-light);
+  --sq-dark: var(--board-dark);
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --paper: #10141f;
     --sheet: #181e2d;
+    --sheet-2: #1e2536;
     --ink: #e7eaf3;
     --ink-2: #a7afc2;
-    --ink-3: #737c93;
+    --ink-3: #7f889e;
     --rule: #283047;
     --rule-2: #3a4460;
-    --blue: #8f9fff;
+    --ruling: #2e3854;
+    --blue: #8fa0ff;
     --blue-ink: #b3beff;
     --blue-wash: #1e2650;
+    --on-blue: #0f1430;
     --red: #ff7d6c;
     --red-wash: #3a2024;
+    --amber: #e0b35a;
+    --amber-wash: rgb(224 179 90 / 18%);
     --ok: #6cc893;
     --warn: #e9b45a;
-    --sq-light: #c3cad8;
-    --sq-dark: #6f7d99;
-    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 10px 30px rgb(0 0 0 / 35%);
+    --board-light: #b9c1d0;
+    --board-dark: #5b6884;
+    --board-last-light: #d9cb8a;
+    --board-last-dark: #8f8a64;
+    --board-edge: #3a4460;
+    --eval-opponent: #3a4460;
+    --shadow-sheet: 0 1px 0 var(--rule), 0 18px 40px -26px rgb(0 0 0 / 60%);
+    --shadow-raised: 0 2px 4px rgb(0 0 0 / 30%), 0 16px 36px rgb(0 0 0 / 45%);
+    --shadow-board: 0 16px 34px -20px rgb(0 0 0 / 70%);
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #10141f;
+  --sheet: #181e2d;
+  --sheet-2: #1e2536;
+  --ink: #e7eaf3;
+  --ink-2: #a7afc2;
+  --ink-3: #7f889e;
+  --rule: #283047;
+  --rule-2: #3a4460;
+  --ruling: #2e3854;
+  --blue: #8fa0ff;
+  --blue-ink: #b3beff;
+  --blue-wash: #1e2650;
+  --on-blue: #0f1430;
+  --red: #ff7d6c;
+  --red-wash: #3a2024;
+  --amber: #e0b35a;
+  --amber-wash: rgb(224 179 90 / 18%);
+  --ok: #6cc893;
+  --warn: #e9b45a;
+  --board-light: #b9c1d0;
+  --board-dark: #5b6884;
+  --board-last-light: #d9cb8a;
+  --board-last-dark: #8f8a64;
+  --board-edge: #3a4460;
+  --eval-opponent: #3a4460;
+  --shadow-sheet: 0 1px 0 var(--rule), 0 18px 40px -26px rgb(0 0 0 / 60%);
+  --shadow-raised: 0 2px 4px rgb(0 0 0 / 30%), 0 16px 36px rgb(0 0 0 / 45%);
+  --shadow-board: 0 16px 34px -20px rgb(0 0 0 / 70%);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--paper); color: var(--ink); font: 400 16px/1.55 var(--font); font-stretch: 100%;
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 var(--text-base)/var(--leading) var(--font); font-stretch: 100%;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 [hidden] { display: none !important; }
 img, svg { display: block; max-width: 100%; }
 a { color: var(--blue); text-underline-offset: 3px; }
+a:where(:hover) { color: var(--blue-ink); }
 button, input, select, textarea { font: inherit; color: inherit; }
-:focus-visible { outline: 2.5px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+code, kbd, samp, pre { font-family: var(--mono); font-size: 0.92em; }
+::selection { background: var(--blue-wash); color: var(--ink); }
+:focus-visible { outline: 2.5px solid var(--blue); outline-offset: 2px; border-radius: var(--radius-sheet); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important; scroll-behavior: auto !important; }
+}
 .skip { position: absolute; left: -999px; top: 8px; background: var(--sheet); padding: 8px 12px; z-index: 50; }
 .skip:focus { left: 8px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* ---------- type ---------- */
 h1, h2, h3, h4 { margin: 0; color: var(--ink); text-wrap: balance; }
-.display { font-size: clamp(2.3rem, 5.2vw, 3.9rem); line-height: 1.02; font-weight: 820; font-stretch: 116%; letter-spacing: -0.025em; }
-h1 { font-size: 2rem; line-height: 1.1; font-weight: 780; font-stretch: 112%; letter-spacing: -0.015em; }
-h2 { font-size: 1.45rem; line-height: 1.2; font-weight: 740; font-stretch: 110%; letter-spacing: -0.01em; }
-h3 { font-size: 1.08rem; line-height: 1.3; font-weight: 650; }
-h4 { font-size: .95rem; font-weight: 650; }
+.display { font-size: var(--text-display); line-height: 1.02; font-weight: 820; font-stretch: 116%; letter-spacing: -0.025em; }
+h1 { font-size: var(--text-2xl); line-height: var(--leading-tight); font-weight: 780; font-stretch: 112%; letter-spacing: -0.015em; }
+h2 { font-size: var(--text-xl); line-height: 1.2; font-weight: 740; font-stretch: 110%; letter-spacing: -0.01em; }
+h3 { font-size: var(--text-md); line-height: 1.3; font-weight: 650; }
+h4 { font-size: var(--text-base); font-weight: 650; }
 p { margin: 0; max-width: 68ch; }
-.lede { font-size: 1.14rem; line-height: 1.55; color: var(--ink-2); max-width: 54ch; }
+.lede { font-size: var(--text-md); line-height: var(--leading); color: var(--ink-2); max-width: 54ch; }
 .muted { color: var(--ink-2); }
 .faint { color: var(--ink-3); }
-.small { font-size: .875rem; }
-.tiny { font-size: .78rem; }
+.small { font-size: var(--text-sm); }
+.tiny { font-size: var(--text-xs); }
 .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.mono { font-family: var(--mono); font-size: var(--move-size); font-variant-numeric: tabular-nums; letter-spacing: 0; }
 .figure { font-stretch: 72%; font-weight: 760; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1; }
 .hand { font-family: var(--hand); font-weight: 600; color: var(--red); line-height: 1; }
 .err { color: var(--red); font-size: .9rem; }

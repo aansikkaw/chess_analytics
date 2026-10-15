@@ -23,6 +23,7 @@ RELEASE = set("""
 .mcp.json
 CLAUDE.md
 DEPLOY.md
+DESIGN.md
 Dockerfile
 README.md
 REVIEW.md
@@ -79,11 +80,14 @@ app/sources.py
 app/static/app.css
 app/static/fonts/LICENSE-Archivo.txt
 app/static/fonts/LICENSE-Caveat.txt
+app/static/fonts/LICENSE-IBMPlexMono.txt
 app/static/fonts/LICENSE-NotoSansSymbols2.txt
 app/static/fonts/archivo-latin-ext-standard-normal.woff2
 app/static/fonts/archivo-latin-standard-normal.woff2
 app/static/fonts/caveat-latin-600-normal.woff2
 app/static/fonts/chess-pieces.woff2
+app/static/fonts/ibm-plex-mono-latin-400-normal.woff2
+app/static/fonts/ibm-plex-mono-latin-600-normal.woff2
 app/static/icons/apple-touch-icon.png
 app/static/icons/favicon-32.png
 app/static/icons/favicon-64.png

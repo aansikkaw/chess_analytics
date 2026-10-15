@@ -7,7 +7,8 @@ const SHELL = ["/", "/static/app.css", "/static/js/main.js", "/static/js/core.js
   "/static/js/views/students.js", "/static/js/views/library.js", "/static/js/views/twin.js", "/static/js/views/puzzles.js",
   "/static/js/views/predict.js", "/static/js/views/think.js", "/static/js/views/scan.js", "/static/js/views/report.js",
   "/static/js/sheetcv.js", "/static/vendor/chess.js",
-  "/static/fonts/archivo-latin-standard-normal.woff2", "/static/fonts/chess-pieces.woff2", "/static/icons/icon-192.png"];
+  "/static/fonts/archivo-latin-standard-normal.woff2", "/static/fonts/chess-pieces.woff2",
+  "/static/fonts/ibm-plex-mono-latin-400-normal.woff2", "/static/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   // cache: "reload" skips the browser's HTTP cache, so a new version never stores stale files.
