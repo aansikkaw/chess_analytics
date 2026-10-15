@@ -4,9 +4,10 @@
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
       "version": "lts"
-    }
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y stockfish && pip install -r requirements-dev.txt",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y stockfish && pip install -r requirements-dev.txt && npx -y playwright install --with-deps chrome",
   "containerEnv": {
     "STOCKFISH_PATH": "/usr/games/stockfish"
   },
