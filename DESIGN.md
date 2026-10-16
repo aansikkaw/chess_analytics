@@ -264,8 +264,12 @@ Easing: `--ease-out` for things arriving, `--ease-in-out` for things moving betw
 - The board: Slate by default, our own themes, two piece sets, the Board menu, 150ms moves.
 - The report card's analysis board: the evaluation bar, your own lines, the shortcuts below, FEN/PGN copy and paste, Open on Lichess, icon buttons.
 
+- The report card: a calm hero row (result, both accuracies, verdict), a scrubbable evaluation graph synced with the board,
+  key moments as cards with a mini-board, the coach's review as prose, phase grades in one compact table. Move classes use
+  the standard symbols with our own words (Sound sacrifice, Only good move, Engine's choice, Inaccuracy, Mistake, Didn't punish,
+  Blunder), red for errors only; the annotated PGN uses the same words.
+
 **Not yet applied** (component rules above, to follow):
-- The report card still uses the old Brilliant/Great/Best labels and colours (`app/static/js/views/report.js`).
 - Move lists outside the report card's Pro view aren't in the mono face yet.
 
 ## Keyboard

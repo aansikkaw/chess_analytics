@@ -28,17 +28,17 @@ from .engine import MATE_CP
 
 VERSION = 1
 MATE_THRESHOLD = MATE_CP - 500
-CLASS_INFO = {  # name -> (symbol, label, NAG)
-    "brilliant": ("!!", "Brilliant", chess.pgn.NAG_BRILLIANT_MOVE),
-    "great": ("!", "Great find", chess.pgn.NAG_GOOD_MOVE),
-    "best": ("★", "Best", None),
-    "excellent": ("", "Excellent", None),
+CLASS_INFO = {  # name -> (symbol, label, NAG). Standard symbols, our own words (DESIGN.md: no other site's move tiers).
+    "brilliant": ("!!", "Sound sacrifice", chess.pgn.NAG_BRILLIANT_MOVE),
+    "great": ("!", "Only good move", chess.pgn.NAG_GOOD_MOVE),
+    "best": ("", "Engine's choice", None),
+    "excellent": ("", "Good", None),
     "good": ("", "Good", None),
-    "book": ("", "Book", None),
-    "forced": ("□", "Forced", 7),  # $7: only move
+    "book": ("", "Book move", None),
+    "forced": ("□", "Only move", 7),  # $7: only move
     "inaccuracy": ("?!", "Inaccuracy", chess.pgn.NAG_DUBIOUS_MOVE),
     "mistake": ("?", "Mistake", chess.pgn.NAG_MISTAKE),
-    "miss": ("✗", "Missed chance", chess.pgn.NAG_MISTAKE),
+    "miss": ("?", "Didn't punish", chess.pgn.NAG_MISTAKE),
     "blunder": ("??", "Blunder", chess.pgn.NAG_BLUNDER),
 }
 CLASS_ORDER = list(CLASS_INFO)
@@ -233,7 +233,8 @@ def key_moments(rows: list[dict], engine, depth: int, limit: int = 6) -> list[di
         out.append({**{k: r[k] for k in ("ply", "color", "san", "best_san", "class", "loss", "win_before", "win_after", "fen", "uci",
                                          "best", "tags", "phase")},
                     "label": f"{num}{r['san']}", "line": line, "reply": reply,
-                    "explain": (f"{num}{r['san']} cost {round(r['loss'])}% of the winning chances" + (f": {why}" if why else "")
+                    "explain": ((f"{num}{r['san']} cost {round(r['loss'])}% of the winning chances" if round(r["loss"]) >= 1
+                                 else f"{num}{r['san']} came when the game was already decided") + (f": {why}" if why else "")
                                 + (f". {r['best_san']} was the move" if r["best_san"] else "") + "."
                                 + (f" After it, {reply} is the strongest reply." if reply else ""))})
     return out
