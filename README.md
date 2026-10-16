@@ -67,6 +67,11 @@ the analysis a beginner would otherwise buy ChessBase for.
 
 ### Game report card (Diagnose → Report card, "Full report card" in the game viewer, or straight after a scan)
 
+Two ways to read it, set under **Account → Analysis view** and remembered for your account:
+**Guided** (the default) explains each move in plain language, with winning chances in %, the one best line, a tip and a
+short tour the first time; **Pro** shows evaluations in pawns (+1.34, #5), engine depth, three engine lines with move
+numbers, coordinates, a compact layout and buttons to copy the FEN and PGN.
+
 * **Both players, every move.** Stockfish checks every position with its two best moves (depth
   `REVIEW_DEPTH`, default 14: about 10–20 seconds for a game).
 * **Move classes:**

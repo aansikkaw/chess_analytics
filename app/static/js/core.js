@@ -91,6 +91,24 @@ export const store = {
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const isPro = () => !!S.me && (S.me.plan === "pro" || S.me.plan === "coach");
 export const isCoach = () => !!S.me && S.me.plan === "coach";
+
+// ---- Guided / Pro view (DESIGN.md: two reading levels over the same data) ----
+/** "guided" (plain language, winning chances) or "pro" (engine numbers, three lines). Saved per user. */
+export const viewMode = () => (S.me && S.me.view_mode === "pro" ? "pro" : "guided");
+export const proView = () => viewMode() === "pro";
+/** Puts the mode on <html data-view> so the stylesheet can tighten the layout for Pro. */
+export const applyViewMode = () => { document.documentElement.dataset.view = viewMode(); };
+const MATE_CP = 10000;
+/** Winning chances (0-100) for a centipawn score, the same curve the server uses (Lichess's). */
+export const winPct = (cp) => 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * Math.max(-1000, Math.min(1000, cp)))) - 1);
+/** Pawns with a sign, "+1.34" / "−0.20", or mate, "#5" / "#−3", from White's side. `mate` wins over `cp`. */
+export function evalText(cp, mate = null, digits = 2) {
+  if (mate == null && cp != null && Math.abs(cp) >= MATE_CP - 500) mate = (cp > 0 ? 1 : -1) * (MATE_CP - Math.abs(cp));
+  if (mate != null) return mate > 0 ? `#${mate}` : mate < 0 ? `#−${-mate}` : "#";
+  if (cp == null) return "–";
+  const v = cp / 100;
+  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(digits)}`;
+}
 export const hasFeature = (f) => !!S.me && S.me.features.includes(f);
 export const account = () => S.me && S.me.accounts.find((a) => a.id === S.accountId);
 

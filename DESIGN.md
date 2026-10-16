@@ -1,6 +1,6 @@
 # Plateau Breaker design system
 
-**Direction: the scoresheet, analyst edition.** Every screen is a chess scoresheet that a strong coach has marked up. Blue ink is you, red pen is the coach, and amber shows the move you are looking at. Beginners read the coach's words; titled players switch to the Analyst view and get engine numbers, depth and standard symbols. Both views draw on the same data.
+**Direction: the scoresheet, analyst edition.** Every screen is a chess scoresheet that a strong coach has marked up. Blue ink is you, red pen is the coach, and amber shows the move you are looking at. Beginners read the coach's words; titled players switch to the Pro view and get engine numbers, depth and standard symbols. Both views draw on the same data.
 
 The tokens live at the top of `app/static/app.css`. This file is the reference for them, and the two must change together.
 
@@ -13,15 +13,17 @@ The tokens live at the top of `app/static/app.css`. This file is the reference f
    - Amber: the current move, or the last move played.
    - Nothing else is coloured.
 3. **Numbers are exact and line up.** Moves and evaluations use the monospace face. Other figures use tabular numbers. Engine output always says which engine and what depth.
-4. **Two reading levels.**
-   - The *Coach view* explains in words: "a bishop for a pawn", winning chances in %.
-   - The *Analyst view* shows pawns (+4.4), depth, three engine lines and standard symbols only.
-   - Never mix the two in one panel.
+4. **Two reading levels: Guided and Pro.** One setting, saved per user (Account → Analysis view), default Guided.
+   - *Guided* explains in words: winning chances in % instead of centipawns, the one best line, a tip, a first-visit tour. Coordinates off.
+   - *Pro* shows pawns (+1.34, #5), engine depth, three engine lines with move numbers, a compact layout, smaller table text,
+     FEN and PGN copy buttons, coordinates on.
+   - Same pages and data in both. `<html data-view="guided|pro">` lets the stylesheet tighten the Pro layout;
+     in JavaScript use `proView()` from `core.js`. Never mix the two levels in one panel.
 5. **Our own brand.** We never use:
    - Chess.com's or Lichess's board colours: green `#739552`/`#ebecd0`, brown `#b58863`/`#f0d9b5`, blue-grey `#8ca2ad`/`#dee3e6`.
    - Their move-quality tiers (Brilliant, Great, Best, Excellent, Miss) or their colours.
    - Their wording or layouts.
-6. **Handwriting is rare.** Caveat (the red pen) is only for the coach's marks: a circled grade, a margin note, the circled weakest skill. Never for buttons, labels or data, and never in the Analyst view.
+6. **Handwriting is rare.** Caveat (the red pen) is only for the coach's marks: a circled grade, a margin note, the circled weakest skill. Never for buttons, labels or data, and never in the Pro view.
 
 ## Colour
 
@@ -206,8 +208,8 @@ Easing: `--ease-out` for things arriving, `--ease-in-out` for things moving betw
 - **Moves:** in `--mono` at `--move-size`. Your moves in `--blue` and weight 600, the opponent's in `--ink`. Move numbers in `--ink-3`.
 - **Current move:** its row gets an `--amber-wash` band. Only one row is ever highlighted.
 - **Symbols:** standard, in `--red` straight after the move: `!!` `!` `!?` `?!` `?` `??`.
-  - Coach view: may circle a `??` in red pen and adds short margin notes.
-  - Analyst view: symbols only, with an eval column after each side.
+  - Guided: may circle a `??` in red pen and adds short margin notes.
+  - Pro: symbols only, moves in `--mono`, with the evaluation after each move.
 - **Variations:** indented under the move they branch from, in `--red` on a faint `--red-wash`, labelled "Engine line, depth N".
 - **Keyboard:** ← → step, Home / End jump, ↑ ↓ choose an engine line.
 

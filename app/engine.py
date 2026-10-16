@@ -75,6 +75,27 @@ class Engine:
             self._cache[key] = result
         return result
 
+    def lines(self, board: chess.Board, n: int, limit: chess.engine.Limit) -> list[dict]:
+        """The engine's `n` best lines from one search (multi-PV), best first: each with White's score
+        (`cp_white`, mates clamped to +/-MATE_CP), `mate_white` (moves to mate, negative if Black mates or None),
+        the line as UCI moves, and the depth reached."""
+        if board.is_game_over():
+            return []
+        with self._lock:
+            infos = self._engine.analyse(board, limit, multipv=max(1, n))
+        if isinstance(infos, dict):
+            infos = [infos]
+        out = []
+        for info in infos:
+            pv, score = info.get("pv"), info.get("score")
+            if not pv or score is None:
+                continue
+            white = score.white()
+            out.append({"cp_white": white.score(mate_score=MATE_CP), "mate_white": white.mate(),
+                        "pv": tuple(m.uci() for m in pv), "depth": int(info.get("depth") or 0)})
+        out.sort(key=lambda x: -x["cp_white"] if board.turn == chess.WHITE else x["cp_white"])
+        return out
+
     def candidates(self, board: chess.Board, n: int, limit: chess.engine.Limit,
                    moves: list[str] | None = None) -> list[tuple[str, int]]:
         """The engine's top `n` moves (or a score for each of `moves`), best first, as (uci, centipawns for the

@@ -52,6 +52,18 @@ def test_signup_login_logout_flow(app_mod):
     assert c.post("/api/auth/login", json={"email": "u1@test.com", "password": "password123"}).status_code == 200
 
 
+def test_view_mode_defaults_to_guided_and_is_remembered(app_mod):
+    c = client(app_mod, "viewmode@test.com")
+    assert c.get("/api/me").json()["view_mode"] == "guided"
+    assert c.patch("/api/me", json={"view_mode": "pro"}).status_code == 200
+    assert c.get("/api/me").json()["view_mode"] == "pro"
+    assert c.patch("/api/me", json={"view_mode": "expert"}).status_code == 422  # only guided or pro
+    assert c.patch("/api/me", json={"digest": False}).status_code == 200  # other settings leave it alone
+    assert c.get("/api/me").json()["view_mode"] == "pro"
+    other = client(app_mod, "viewmode2@test.com")
+    assert other.get("/api/me").json()["view_mode"] == "guided"  # per user
+
+
 def test_passwords_are_hashed(app_mod):
     client(app_mod, "hash@test.com")
     u = app_mod.store.user_by_email("hash@test.com")

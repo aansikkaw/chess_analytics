@@ -343,6 +343,7 @@ USER_COLUMNS = {  # added after v0.4; created by _migrate on older databases
     "last_digest_at": "REAL",
     "unsubscribe_token": "TEXT",
     "terms_accepted_at": "REAL",  # agreed to the Terms and Privacy Policy, and confirmed 18+
+    "view_mode": "TEXT NOT NULL DEFAULT 'guided'",  # how analysis is shown: 'guided' (plain language) or 'pro' (engine numbers)
 }
 
 
@@ -607,7 +608,7 @@ class Store:
             c.execute("UPDATE users SET plan = ?, plan_expires_at = ? WHERE id = ?", (plan, expires_at, user_id))
 
     def update_user(self, user_id: int, **fields) -> None:
-        allowed = {"digest_opt_in", "last_digest_at", "email_verified_at", "pw_hash", "terms_accepted_at"}
+        allowed = {"digest_opt_in", "last_digest_at", "email_verified_at", "pw_hash", "terms_accepted_at", "view_mode"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if sets:
             with self._conn() as c:

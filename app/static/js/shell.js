@@ -1,6 +1,7 @@
 // Signed-in shell: routing between the main sections, the account switcher and sync, the account panel, banners.
 
-import { $, $$, PLATFORM, S, account, ago, api, del, el, fill, isCoach, isPro, openDialog, patch, post, showErr, sleep, store, toast, track, upload } from "./core.js";
+import { $, $$, PLATFORM, S, account, ago, api, applyViewMode, del, el, fill, isCoach, isPro, openDialog, patch, post, showErr, sleep, store, toast, track,
+  upload, viewMode } from "./core.js";
 import * as diagnose from "./views/diagnose.js";
 import * as train from "./views/train.js";
 import * as prepare from "./views/prepare.js";
@@ -27,6 +28,7 @@ export async function startApp({ fresh = false } = {}, onSignOut) {
   signOutCb = onSignOut || signOutCb;
   S.me = await api("/api/me");
   if (await joinPendingInvite()) S.me = await api("/api/me");
+  applyViewMode();
   $("#landing").hidden = true;
   $("#app").hidden = false;
   const saved = store.get("pb:account");
@@ -72,6 +74,7 @@ async function linkPending() {
 
 export async function refreshMe() {
   S.me = await api("/api/me");
+  applyViewMode();
   renderTop();
   renderBanners();
 }
@@ -377,6 +380,38 @@ function syncPanel(a, rerender) {
 }
 
 // ---------------- my account ----------------
+const VIEW_MODES = {
+  guided: { label: "Guided", text: "Plain-language explanations, winning chances in %, the one best line, tips, and a short tour the first time." },
+  pro: { label: "Pro", text: "Evaluations in pawns (+1.34, #5), engine depth, three engine lines, a compact layout, FEN and PGN copy buttons." },
+};
+
+/** The Guided / Pro switch: saved on the account, applied at once to the page you're on. */
+function viewModePicker() {
+  const hint = el("p", { class: "small muted", id: "viewModeHint" });
+  const buttons = Object.entries(VIEW_MODES).map(([mode, m]) => el("button", { type: "button", "data-mode": mode, text: m.label,
+    "aria-describedby": "viewModeHint", onclick: () => choose(mode) }));
+  const sync = () => {
+    for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.mode === viewMode()));
+    hint.textContent = VIEW_MODES[viewMode()].text;
+  };
+  async function choose(mode) {
+    if (mode === viewMode()) return;
+    const before = S.me.view_mode;
+    S.me.view_mode = mode;
+    sync();
+    try {
+      await patch("/api/me", { view_mode: mode });
+      applyViewMode();
+      track("View mode", { mode });
+      toast(`${VIEW_MODES[mode].label} view on.`);
+      route(); // redraw the page underneath with the new level of detail
+    } catch (e) { S.me.view_mode = before; sync(); toast(e.message); }
+  }
+  sync();
+  return el("div", { class: "stack" }, el("h3", { text: "Analysis view" }),
+    el("div", { class: "seg", role: "group", "aria-label": "Analysis view" }, ...buttons), hint);
+}
+
 function openMe() {
   const body = $("#meBody");
   const digest = el("input", { type: "checkbox" });
@@ -385,6 +420,7 @@ function openMe() {
     try { await patch("/api/me", { digest: digest.checked }); S.me.digest = digest.checked; toast(digest.checked ? "Weekly email on." : "Weekly email off."); }
     catch (e) { digest.checked = !digest.checked; toast(e.message); }
   });
+  const viewPick = viewModePicker();
   const pw = el("input", { type: "password", id: "delPw", autocomplete: "current-password" });
   const delErr = el("p", { class: "err", role: "alert", hidden: true });
   const delForm = el("form", { class: "stack" },
@@ -410,6 +446,7 @@ function openMe() {
           try { await del(`/api/me/coaching/${c.student_id}`); await refreshMe(); $("#meDlg").close(); toast("You've left the squad."); }
           catch (ex) { toast(ex.message); }
         } })))) : null,
+    viewPick,
     el("div", { class: "stack" }, el("h3", { text: "Email" }), el("label", { class: "check" }, digest, "Send me a weekly summary of my games")),
     el("div", { class: "stack" }, el("h3", { text: "Your data" }),
       el("p", { class: "small muted", text: "Download everything we hold about you: account, games, puzzles, coaching and activity, as JSON files in a zip." }),

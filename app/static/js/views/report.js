@@ -1,8 +1,10 @@
 // Game report card: one game, both players, every move checked by Stockfish, then written up by the coach.
 // Route: #/report/<accountId>/<gameId>. Grades and accuracy per player, the evaluation graph, move classes,
 // key moments on the board, phase grades, the coach's review, and an annotated PGN to download.
+// Guided view (default): winning chances, the one best line, tips and a first-visit tour. Pro view: evaluations in
+// pawns, engine depth, three engine lines, coordinates, FEN/PGN copy. Same page, same data (DESIGN.md).
 
-import { api, el, fill, post, svg, toast, track } from "../core.js";
+import { api, el, evalText, fill, post, proView, store, svg, toast, track } from "../core.js";
 import { Board, boardSettings, uciArrow } from "../board.js";
 import { followJob } from "./common.js";
 
@@ -17,12 +19,26 @@ const FEATURE_LINK = { predicted: "#/train/predicted", think: "#/train/think", m
   prepare: "#/prepare" };
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
 const num = (m) => `${m.move_number}${m.color === "white" ? "." : "..."}`;
-const MATE = 10000;
-/** White's evaluation after a move: "+1.2", "−0.4", "M3" (White mates in 3) or "−M2". */
-const evalText = (v) => {
-  if (Math.abs(v) >= MATE - 500) { const n = MATE - Math.abs(v); return n ? `${v > 0 ? "" : "−"}M${n}` : "mate"; }
-  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${(Math.abs(v) / 100).toFixed(1)}`;
+const BAD = ["inaccuracy", "mistake", "miss", "blunder"];
+/** Guided view: one habit to take away, from what went wrong on the move. */
+const TIPS = {
+  allowed_mate: "Before going after material, check that your king is safe.",
+  missed_mate: "When the enemy king is exposed, look at every check: one of them may mate.",
+  hanging_piece: "Before each move, ask which of your pieces it leaves undefended.",
+  missed_tactic: "Look at checks, captures and threats first, for both sides.",
+  missed_punish: "Your opponent had just gone wrong. Look for the move that punishes it.",
+  let_slip: "When you're winning, trade pieces and keep the position simple.",
+  time_trouble: "Spend less time early on, so you have it for moments like this.",
 };
+const TOUR_KEY = "pb:tour:report:v1";
+
+/** Engine lines for a position, cached per page. `n` 1 (Guided best line) or 3 (Pro). */
+const lineCache = new Map();
+async function engineLines(fen, n) {
+  const key = `${n}|${fen}`;
+  if (!lineCache.has(key)) lineCache.set(key, post("/api/engine/analyse", { fen, lines: n }).catch((e) => { lineCache.delete(key); throw e; }));
+  return lineCache.get(key);
+}
 
 export async function render(main) {
   const [, accountId, gameId] = location.hash.replace(/^#\/?/, "").split("/");
@@ -73,7 +89,10 @@ function draw(body, d, accountId, gameId, url, head) {
 
   // ---- the board and the move list ----
   const boardHost = el("div", { class: "report-board" });
-  const board = new Board(boardHost, { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", orientation: you || "white", label: "Game board" });
+  const pro = proView();
+  body.classList.add("report-page");
+  const board = new Board(boardHost, { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", orientation: you || "white", label: "Game board",
+    coords: pro });
   const note = el("div", { class: "report-note", "aria-live": "polite" });
   const list = el("ol", { class: "report-moves" });
   const items = [];
@@ -82,7 +101,7 @@ function draw(body, d, accountId, gameId, url, head) {
     for (const m of [moves[i], moves[i + 1]].filter(Boolean)) {
       const [sym, label, color] = CLASS[m.class];
       const b = el("button", { type: "button", class: `mv c-${m.class}`, "aria-label": `${num(m)}${m.san}, ${label}`, onclick: () => go(m.ply + 1) },
-        m.san, sym ? el("b", { style: { color }, text: sym }) : null);
+        m.san, sym ? el("b", { style: { color }, text: sym }) : null, pro ? el("span", { class: "mv-eval", text: evalText(m.eval_white, null, 1) }) : null);
       items[m.ply] = b;
       li.append(b);
     }
@@ -94,23 +113,67 @@ function draw(body, d, accountId, gameId, url, head) {
     items.forEach((b) => b && b.removeAttribute("aria-current"));
     const m = cur > 0 ? moves[cur - 1] : null;
     if (m && items[m.ply]) { items[m.ply].setAttribute("aria-current", "true"); items[m.ply].scrollIntoView({ block: "nearest", inline: "nearest" }); }
-    const bad = m && ["inaccuracy", "mistake", "miss", "blunder"].includes(m.class);
+    const bad = m && BAD.includes(m.class);
+    let shownFen;
     if (bad && showBest) { // show the position before the mistake: what was played (blue) and what was best (red)
+      shownFen = m.fen;
       board.set({ fen: m.fen, lastMove: m.ply > 0 ? moves[m.ply - 1].uci : null, arrows: [uciArrow(m.uci, "you"), uciArrow(m.best, "coach")].filter(Boolean) });
     } else {
-      const fen = m ? afterFen(m) : moves.length ? moves[0].fen : board.fen;
-      board.set({ fen, lastMove: m ? m.uci : null, arrows: [] });
+      shownFen = m ? afterFen(m) : moves.length ? moves[0].fen : board.fen;
+      board.set({ fen: shownFen, lastMove: m ? m.uci : null, arrows: [] });
     }
     graph.mark(cur);
+    if (pro) showLines(shownFen);
     if (!m) { fill(note, el("p", { class: "small muted", text: "Start position. Use the arrows, the graph or the move list." })); return; }
     const [sym, label, color] = CLASS[m.class];
-    fill(note, el("p", {}, el("b", { text: `${num(m)}${m.san}${sym}` }), " ", el("span", { class: "cls", style: { background: color }, text: label }),
-      m.loss >= 1 ? ` · cost ${Math.round(m.loss)}% of the winning chances` : "",
-      el("span", { class: "tiny faint", title: "Stockfish's evaluation after the move, from White's side", text: ` · eval ${evalText(m.eval_white)}` })),
-    bad && m.best_san ? el("p", { class: "small" }, "Better was ", el("b", { text: m.best_san }), ". The red arrow shows it; the blue one, the move played.") : null,
-    m.class === "great" ? el("p", { class: "small muted", text: "The only good move here, and it was found." }) : null,
-    m.class === "brilliant" ? el("p", { class: "small muted", text: "A sound sacrifice: giving material for something better." }) : null,
-    m.class === "book" ? el("p", { class: "small muted", text: "Known opening theory." }) : null);
+    const head = el("p", {}, el("b", { class: "mono", text: `${num(m)}${m.san}${sym}` }), " ", el("span", { class: "cls", style: { background: color }, text: label }));
+    if (pro) {
+      const before = m.ply > 0 ? `${evalText(moves[m.ply - 1].eval_white)} → ` : "";
+      head.append(el("span", { class: "mono note-eval", title: "Stockfish's evaluation before → after the move, from White's side",
+        text: ` ${before}${evalText(m.eval_white)}` }),
+        el("span", { class: "tiny faint", text: ` · depth ${rep.depth}` }), m.loss >= 1 ? el("span", { class: "tiny faint", text: ` · −${Math.round(m.loss)}% win chance` }) : "");
+      fill(note, head, bad && m.best_san ? el("p", { class: "small" }, "Best was ", el("b", { class: "mono", text: m.best_san }), ".") : null);
+      return;
+    }
+    // Guided: winning chances for the side that moved, then the better move and its line, then one tip.
+    const who = m.color === you ? "Your" : `${cap(m.color)}'s`;
+    const chances = el("p", { class: "small" }, `${who} winning chances: `, el("b", { text: `${Math.round(m.win_before)}%` }), " → ",
+      el("b", { text: `${Math.round(m.win_after)}%` }), m.loss >= 1 ? el("span", { class: "muted", text: ` (−${Math.round(m.loss)}%)` }) : "");
+    const bestLine = el("p", { class: "small" });
+    const tip = bad ? (m.tags || []).map((t) => TIPS[t]).find(Boolean) || "Compare your move with the red arrow: what does it do that yours doesn't?" : null;
+    fill(note, head, chances,
+      bad && m.best_san ? el("p", { class: "small" }, "Better was ", el("b", { text: m.best_san }), ". The red arrow shows it; the blue one, the move played.") : null,
+      bad ? bestLine : null,
+      tip ? el("p", { class: "small tip" }, el("b", { text: "Tip: " }), tip) : null,
+      m.class === "great" ? el("p", { class: "small muted", text: "The only good move here, and it was found." }) : null,
+      m.class === "brilliant" ? el("p", { class: "small muted", text: "A sound sacrifice: giving material for something better." }) : null,
+      m.class === "book" ? el("p", { class: "small muted", text: "Known opening theory." }) : null);
+    if (bad) {
+      const at = cur;
+      engineLines(m.fen, 1).then((r) => {
+        if (at !== cur || !r.lines || !r.lines.length) return;
+        fill(bestLine, el("span", { class: "muted", text: "Best line: " }), el("span", { class: "mono", text: r.lines[0].text }));
+      }).catch(() => {});
+    }
+  }
+
+  // ---- Pro: three engine lines for the position on the board ----
+  const linesBox = el("section", { class: "engine-lines", "aria-label": "Engine lines", "aria-live": "polite" });
+  let linesTimer = null;
+  function showLines(fen) {
+    clearTimeout(linesTimer);
+    fill(linesBox, el("p", { class: "tiny faint", text: "Engine thinking…" }));
+    linesTimer = setTimeout(async () => { // stepping quickly through moves asks the engine once, for where you stop
+      try {
+        const r = await engineLines(fen, 3);
+        if (board.fen !== fen) return;
+        if (r.over) { fill(linesBox, el("p", { class: "small muted", text: `Game over: ${r.result}` })); return; }
+        fill(linesBox, el("div", { class: "spread" }, el("b", { class: "small", text: "Engine lines" }),
+          el("span", { class: "tiny faint", text: `Stockfish · depth ${r.depth}` })),
+        el("ol", { class: "lines-list" }, ...r.lines.map((ln) => el("li", {},
+          el("span", { class: "mono line-eval", text: evalText(ln.cp, ln.mate) }), el("span", { class: "mono line-moves", text: ln.text })))));
+      } catch (e) { fill(linesBox, el("p", { class: "small muted", text: e.status === 429 ? e.message : "The engine isn't available right now." })); }
+    }, 250);
   }
   const fenAfter = new Map();
   const afterFen = (m) => {
@@ -134,6 +197,16 @@ function draw(body, d, accountId, gameId, url, head) {
 
   const graph = evalGraph(rep, (n) => go(n));
 
+  // ---- Pro: copy the position or the whole game ----
+  const copy = async (text, what) => {
+    try { await navigator.clipboard.writeText(text); toast(`${what} copied.`); } catch { toast(`Couldn't copy the ${what}. Your browser blocked it.`); }
+  };
+  const copyRow = pro ? el("div", { class: "row copy-row" },
+    el("button", { class: "btn quiet small", type: "button", text: "Copy FEN", onclick: () => copy(board.fen, "FEN") }),
+    el("button", { class: "btn quiet small", type: "button", text: "Copy PGN", onclick: async () => {
+      try { copy(await (await fetch(`${url}.pgn`, { credentials: "same-origin" })).text(), "PGN"); } catch { toast("Couldn't load the PGN."); }
+    } })) : null;
+
   // ---- the grade cards ----
   const gradeCard = (c) => {
     const s = rep.sides[c];
@@ -143,7 +216,7 @@ function draw(body, d, accountId, gameId, url, head) {
         el("div", {}, el("b", { text: name }), el("span", { class: "tiny faint", text: you === c ? `${cap(c)} · you` : cap(c) }))),
       el("div", { class: "grade-main" }, el("span", { class: `grade g-${s.grade || "none"}`, text: s.grade || "–" }),
         el("div", {}, el("b", { class: "figure", text: s.accuracy != null ? `${s.accuracy}%` : "–" }), el("span", { class: "tiny faint", text: "accuracy" }))),
-      el("p", { class: "tiny faint", text: s.acpl != null ? `Average loss ${s.acpl} centipawns a move · ${s.moves} moves` : "" }),
+      el("p", { class: "tiny faint", text: !pro ? `${s.moves} moves` : s.acpl != null ? `Average loss ${s.acpl} centipawns a move · ${s.moves} moves` : "" }),
       el("div", { class: "grade-counts" }, ...["brilliant", "great", "best", "inaccuracy", "mistake", "blunder"].map((k) =>
         el("span", { title: CLASS[k][1] }, el("i", { style: { background: CLASS[k][2] }, text: CLASS[k][0] || "•" }), String(s.counts[k] || 0)))));
   };
@@ -159,7 +232,8 @@ function draw(body, d, accountId, gameId, url, head) {
         el("button", { class: "link", type: "button", text: rep.turning_point.label, onclick: () => go(rep.turning_point.ply + 1) })) : null,
       el("div", { class: "row" },
         el("a", { class: "btn quiet small", href: `${url}.pgn`, download: "", text: "Download annotated PGN" }),
-        el("span", { class: "tiny faint", text: `Stockfish depth ${rep.depth}, both players, top two moves in every position.` }))),
+        el("span", { class: "tiny faint", text: pro ? `Stockfish depth ${rep.depth}, both players, top two moves in every position.`
+          : "Every move from both players, checked by Stockfish." }))),
     el("div", { class: "grade-pair" }, gradeCard("white"), gradeCard("black")));
 
   // ---- phases and move classes ----
@@ -182,7 +256,9 @@ function draw(body, d, accountId, gameId, url, head) {
     rep.key_moments.length ? el("ol", { class: "key-list" }, ...rep.key_moments.map((k) => el("li", {},
       el("button", { type: "button", class: "key-item", onclick: () => go(k.ply + 1) },
         el("span", { class: "cls", style: { background: CLASS[k.class][2] }, text: CLASS[k.class][1] }),
-        el("b", { text: `${k.label}${CLASS[k.class][0]}` }), el("span", { class: "tiny faint", text: ` ${k.color === you ? "you" : k.color} · −${Math.round(k.loss)}%` }),
+        el("b", { class: pro ? "mono" : "", text: `${k.label}${CLASS[k.class][0]}` }),
+        el("span", { class: "tiny faint", text: ` ${k.color === you ? "you" : k.color} · ` + (pro && moves[k.ply]
+          ? `${evalText(k.ply > 0 ? moves[k.ply - 1].eval_white : 0)} → ${evalText(moves[k.ply].eval_white)}` : `−${Math.round(k.loss)}%`) }),
         el("span", { class: "small", text: k.explain }),
         k.line && k.line.length ? el("span", { class: "tiny faint", text: `Engine line: ${k.line.join(" ")}` }) : null))))
       : el("p", { class: "small muted", text: "No big swings: a clean game from both sides." }));
@@ -193,11 +269,49 @@ function draw(body, d, accountId, gameId, url, head) {
   fill(body, hero, el("section", { class: "sheet report-graph" }, el("div", { class: "spread" }, el("h3", { text: "Evaluation" }),
     el("span", { class: "tiny faint", text: "White's winning chances move by move. Click to jump." })), graph.node),
   el("div", { class: "report-main" },
-    el("div", { class: "report-left" }, boardHost, el("div", { class: "board-foot" }, nav, boardSettings(board)), note, el("div", { class: "report-movebox" }, list)),
+    el("div", { class: "report-left" }, boardHost, el("div", { class: "board-foot" }, nav, boardSettings(board)), copyRow, note,
+      pro ? linesBox : null, el("div", { class: "report-movebox" }, list)),
     el("div", { class: "report-right stack-lg" }, coach, km)),
   el("div", { class: "grid-2 even" }, phases, classes));
   const firstKey = rep.key_moments.find((k) => k.color === you) || rep.key_moments[0];
   go(firstKey ? firstKey.ply + 1 : 0);
+  if (!pro && !store.get(TOUR_KEY)) {
+    tour([
+      { target: hero, title: "How the game was decided", text: "The verdict in one line, and both players' grades. A is 90% accuracy or better." },
+      { target: graph.node, title: "Who was winning", text: "Your winning chances move by move. Dots mark the mistakes; click anywhere to jump there." },
+      { target: boardHost, title: "Blue is you, red is the coach", text: "On a mistake, the blue arrow is the move played and the red arrow is the better one." },
+      { target: list, title: "Every move, marked", text: "Click any move, or use the ← and → keys. ?! is loose, ? costly, ?? drops the game." },
+    ]);
+  }
+}
+
+/** A short first-visit tour: one card at the bottom of the screen, the part it talks about outlined. */
+function tour(steps) {
+  let i = 0;
+  const box = el("div", { class: "tour", role: "dialog", "aria-labelledby": "tourTitle" });
+  const done = () => {
+    store.set(TOUR_KEY, 1);
+    document.querySelectorAll(".tour-target").forEach((n) => n.classList.remove("tour-target"));
+    document.removeEventListener("keydown", onKey);
+    window.removeEventListener("hashchange", done);
+    box.remove();
+  };
+  const onKey = (e) => { if (e.key === "Escape") done(); };
+  function show() {
+    document.querySelectorAll(".tour-target").forEach((n) => n.classList.remove("tour-target"));
+    const st = steps[i];
+    st.target.classList.add("tour-target");
+    st.target.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    const last = i === steps.length - 1;
+    const next = el("button", { class: "btn small", type: "button", text: last ? "Done" : "Next", onclick: () => { if (last) done(); else { i += 1; show(); } } });
+    fill(box, el("p", { class: "tiny faint", text: `${i + 1} of ${steps.length}` }), el("h3", { id: "tourTitle", text: st.title }), el("p", { class: "small", text: st.text }),
+      el("div", { class: "row" }, next, el("button", { class: "btn quiet small", type: "button", text: "Skip the tour", onclick: done })));
+    next.focus({ preventScroll: true });
+  }
+  document.addEventListener("keydown", onKey);
+  window.addEventListener("hashchange", done, { once: true }); // leaving the page ends the tour
+  document.body.append(box);
+  show();
 }
 
 function coachCard(d, url, reload, jump) {

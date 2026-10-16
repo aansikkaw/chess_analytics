@@ -81,6 +81,25 @@ def test_engine_analyse_for_explore(m):
         assert c.post("/api/engine/analyse", json={"fen": "8/8/8/8/8/8/8/8 w - - 0 1"}).status_code == 400  # no kings
 
 
+@needs_engine
+def test_engine_analyse_several_lines_with_move_numbers(m):
+    m.analyse_limiter._hits.clear()
+    with client(m, "lines@test.com") as c:
+        fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+        r = c.post("/api/engine/analyse", json={"fen": fen, "lines": 3}).json()
+        assert len(r["lines"]) == 3 and r["depth"] >= 1
+        firsts = [ln["san"][0] for ln in r["lines"]]
+        assert len(set(firsts)) == 3  # three different candidate moves
+        assert r["lines"][0]["text"].startswith("3.") and r["best_san"] == firsts[0]
+        cps = [ln["cp"] for ln in r["lines"]]
+        assert cps == sorted(cps, reverse=True)  # best first, White's point of view
+        black = c.post("/api/engine/analyse", json={"fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1", "lines": 2}).json()
+        assert black["lines"][0]["text"].startswith("1…") and len(black["lines"]) == 2
+        mate = c.post("/api/engine/analyse", json={"fen": "6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1"}).json()
+        assert mate["lines"][0]["mate"] == 1 and mate["lines"][0]["text"] == "1.Rd8#"
+        assert c.post("/api/engine/analyse", json={"fen": fen, "lines": 4}).status_code == 422
+
+
 def test_bigger_imports_on_every_plan():
     assert PLANS["free"]["max_games_per_sync"] == 200
     assert PLANS["pro"]["max_games_per_sync"] == 500

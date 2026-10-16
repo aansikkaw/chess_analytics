@@ -22,6 +22,7 @@ import zipfile
 from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import chess
 import chess.engine
@@ -384,6 +385,7 @@ class PasswordBody(BaseModel):
 
 class MePatch(BaseModel):
     digest: bool | None = None
+    view_mode: Literal["guided", "pro"] | None = None  # Guided: plain language; Pro: engine numbers, several lines
 
 
 class LinkRequest(BaseModel):
@@ -417,6 +419,7 @@ class HintRequest(BaseModel):
 
 class AnalyseRequest(BaseModel):
     fen: str = Field(..., max_length=100)
+    lines: int = Field(1, ge=1, le=3)  # engine lines (multi-PV); Pro view asks for 3
 
 
 class ChatRequest(BaseModel):
@@ -578,6 +581,7 @@ def me(user: dict = Depends(current_user)) -> dict:
         "email": user["email"], "plan": plan_id, "plan_name": p["name"], "is_admin": bool(user["is_admin"]),
         "plan_expires_at": user.get("plan_expires_at") if plan_id != "free" else None,
         "email_verified": bool(user.get("email_verified_at")), "digest": bool(user.get("digest_opt_in", 1)),
+        "view_mode": user.get("view_mode") or "guided",
         "sponsored_by": user.get("sponsored_by"), "max_students": p.get("max_students", 0),
         "coaches": [{"student_id": c["id"], "coach_email": c["coach_email"]} for c in store.coaches_of(user["id"])],
         "features": sorted(p["features"]),
@@ -592,6 +596,8 @@ def me(user: dict = Depends(current_user)) -> dict:
 def patch_me(body: MePatch, user: dict = Depends(current_user)) -> dict:
     if body.digest is not None:
         store.update_user(user["id"], digest_opt_in=int(body.digest))
+    if body.view_mode is not None:
+        store.update_user(user["id"], view_mode=body.view_mode)
     return {"ok": True}
 
 
@@ -921,16 +927,38 @@ def engine_analyse(body: AnalyseRequest, user: dict = Depends(current_user)) -> 
     if board.is_game_over():
         outcome = board.outcome()
         return {"over": True, "result": outcome.result() if outcome else "*", "cp": None, "mate": None, "best": None, "line": []}
-    ev = state["engine"].evaluate(board, chess.engine.Limit(depth=18, time=0.35))
-    line, b = [], board.copy()
-    for u in ev.pv[:6]:
-        mv = chess.Move.from_uci(u)
-        if mv not in b.legal_moves:
-            break
-        line.append(b.san(mv))
-        b.push(mv)
-    return {"over": False, "cp": ev.cp_white if ev.mate_white is None else None, "mate": ev.mate_white,
-            "best": ev.best_move, "best_san": line[0] if line else None, "line": line}
+    found = state["engine"].lines(board, body.lines, chess.engine.Limit(depth=18, time=0.35 * body.lines))
+    lines = []
+    for ln in found:
+        san, b = [], board.copy()
+        for u in ln["pv"][:8]:
+            mv = chess.Move.from_uci(u)
+            if mv not in b.legal_moves:
+                break
+            san.append(b.san(mv))
+            b.push(mv)
+        lines.append({"cp": ln["cp_white"] if ln["mate_white"] is None else None, "mate": ln["mate_white"],
+                      "san": san, "text": numbered_line(board, san), "depth": ln["depth"]})
+    top = lines[0] if lines else {"cp": None, "mate": None, "san": []}
+    return {"over": False, "cp": top["cp"], "mate": top["mate"], "best": found[0]["pv"][0] if found else None,
+            "best_san": top["san"][0] if top["san"] else None, "line": top["san"][:6],
+            "depth": max((ln["depth"] for ln in lines), default=0), "lines": lines}
+
+
+def numbered_line(board: chess.Board, san: list[str]) -> str:
+    """A line with move numbers from `board`: "12.Nxe6 Qc8 13.Nxf8", or "12…Nxg6 13.Qh5" when Black is to move."""
+    n, white, parts = board.fullmove_number, board.turn == chess.WHITE, []
+    for i, mv in enumerate(san):
+        if white:
+            parts.append(f"{n}.{mv}")
+        elif i == 0:
+            parts.append(f"{n}…{mv}")
+        else:
+            parts.append(mv)
+        if not white:
+            n += 1
+        white = not white
+    return " ".join(parts)
 
 
 @app.post("/api/puzzles/{puzzle_id}/attempt")
