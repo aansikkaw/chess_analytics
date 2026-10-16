@@ -194,8 +194,13 @@ class Importer:
                 # Newest first, so a big ChessBase database contributes its recent games, not its oldest.
                 records.sort(key=lambda r: r.played_at.replace("?", "0"), reverse=True)
                 new = [r for r in records if r.game_id not in known][: p["max_games"]]
+                # A game the user is waiting on (sign-up straight to its report card) goes first, alone, so it's saved in seconds.
+                first = next((r for r in new if r.game_id == p.get("first_game_id")), None)
+                if first:
+                    new = [first] + [r for r in new if r is not first]
                 p = {"max_games": p["max_games"], "pending": [_record_to_dict(r) for r in new], "skipped": len(records) - len(new),
-                     "total": len(new), "done": 0, "added": 0, "fetched_at": fetched_at, "found": len(records)}
+                     "total": len(new), "done": 0, "added": 0, "fetched_at": fetched_at, "found": len(records),
+                     "first_alone": bool(first), "shown": False}
                 ctx.progress(stage="Waiting for the engine" if new else "Up to date", total=len(new), done=0, skipped=p["skipped"])
                 if not new:
                     if not (self.knowledge.path(account) / "log.md").exists():
@@ -204,14 +209,17 @@ class Importer:
                     return {"new_games": 0, "skipped": p["skipped"], "puzzles_added": 0, "found": p["found"]}
 
             # One chunk of analysis.
-            chunk = [_record_from_dict(d) for d in p["pending"][: self.settings.import_chunk]]
-            rest = p["pending"][self.settings.import_chunk:]
+            size = 1 if p.pop("first_alone", False) else self.settings.import_chunk
+            chunk = [_record_from_dict(d) for d in p["pending"][:size]]
             engine = ctx.resources["engines"].main
             ctx.progress(stage="Analysing with Stockfish", total=p["total"], done=p["done"], skipped=p["skipped"])
             analysed = []
             for g in chunk:
                 analysed.append(analyse_game(g, engine))
                 ctx.progress(done=p["done"] + len(analysed))
+                if len(analysed) < len(chunk) and ctx.queue.interactive_waiting():
+                    break  # someone is waiting for a report card: save this game and step aside (the rest comes next turn)
+            rest = p["pending"][len(analysed):]
             if not self.store.account(account["id"]):  # removed (or the user deleted their account) while we worked
                 raise JobError("This account was removed.")
             self.store.save_games(key, analysed)
@@ -221,10 +229,12 @@ class Importer:
                 self.knowledge.remove(account)
                 raise JobError("This account was removed.")
             p["done"] += len(analysed)
-            first_chunk = p["done"] == len(analysed)
+            # Show results while the rest imports, once there's a real batch (not just a single game put first).
+            first_chunk = not p.get("shown", False) and p["done"] >= min(self.settings.import_chunk, p["total"])
 
             if rest:
-                if first_chunk:  # show results while the rest imports
+                if first_chunk:
+                    p["shown"] = True
                     ctx.progress(stage="Writing your first results")
                     self.knowledge.rebuild(account)
                     ctx.partial(first_results=True, new_games=p["done"], puzzles_added=p["added"])
@@ -527,7 +537,7 @@ def preview_summary(handle: str, platform: str, games: list) -> dict:
         moment = {"fen": m.fen_before, "you_played": m.played_san, "engine_best": m.best_san, "engine_line": m.best_line[:5],
                   "move": f"{m.move_number}{'.' if m.color == 'white' else '...'}{m.played_san}", "opponent": g.opponent,
                   "date": g.played_at, "winning_chances_lost": round(m.win_loss), "phase": m.phase, "game_url": g.url,
-                  "played_uci": m.played, "best_uci": m.best}
+                  "played_uci": m.played, "best_uci": m.best, "game_id": g.game_id}
     return {"handle": handle, "platform": platform, "games": len(games), "dna": dna, "insights": ins, "moment": moment}
 
 

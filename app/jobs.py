@@ -177,6 +177,15 @@ class JobQueue:
                 "last_heartbeat_s": round(time.time() - beat) if beat else None,
                 "finished_24h": finished, "failed_24h": failed}
 
+    def interactive_waiting(self) -> bool:
+        """Is a job someone is waiting for on screen queued and ready to start? That's anything more urgent than an
+        import (a report card, a Prep Check, a new user's first game: see PRIORITY and `submit(priority=…)`), except
+        previews, which have their own lane. Imports check this between games and step aside, so the job isn't stuck
+        behind a whole batch."""
+        with self._conn() as c:
+            return c.execute("SELECT 1 FROM jobs WHERE state = 'queued' AND priority < ? AND kind != 'preview' "
+                             "AND (not_before IS NULL OR not_before <= ?) LIMIT 1", (PRIORITY["import"], time.time())).fetchone() is not None
+
     # ---- workers ----------------------------------------------------------------
     def claim(self, worker: str, kinds: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> dict | None:
         """Atomically take the next job. A user with a running job waits, so one person can't fill every worker,
@@ -236,13 +245,16 @@ class JobQueue:
                       (error[:1000], time.time(), time.time(), job_id))
 
     def requeue(self, job_id: str, payload: dict | None = None, delay: float = 0.0, stage: str | None = None) -> None:
-        """Back of the line (created_at = now), optionally not before `delay` seconds."""
+        """Back of the line (created_at = now), optionally not before `delay` seconds. A priority boost given at
+        submit time lasts one turn: the job goes back at its kind's usual priority."""
         now = time.time()
         with self._conn() as c:
+            row = c.execute("SELECT kind FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            usual = PRIORITY.get(row[0], 5) if row else 5
             c.execute(
-                "UPDATE jobs SET state = 'queued', worker = NULL, created_at = ?, not_before = ?, "
+                "UPDATE jobs SET state = 'queued', worker = NULL, created_at = ?, not_before = ?, priority = ?, "
                 "payload = COALESCE(?, payload), stage = COALESCE(?, stage) WHERE id = ?",
-                (now, now + delay if delay else None, json.dumps(payload) if payload is not None else None, stage, job_id),
+                (now, now + delay if delay else None, usual, json.dumps(payload) if payload is not None else None, stage, job_id),
             )
 
     def recover(self, stale_after: float = STALE_AFTER_S) -> int:

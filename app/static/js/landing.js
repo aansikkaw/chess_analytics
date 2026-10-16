@@ -1,32 +1,18 @@
-// Signed-out experience: hero with a sample Rating DNA, the no-signup preview, sign in / sign up,
-// forgotten password, password reset and email verification pages.
+// Signed-out experience: hero with a live sample report card, the no-signup preview, sign in / sign up,
+// forgotten password, password reset and email verification pages. The path from here to a first report card
+// is: username -> preview (~15 s) -> free account -> that game's report card, analysed first (about a minute).
 
-import { $, S, api, el, openDialog, post, showErr, sleep, toast, track } from "./core.js";
+import { $, S, api, el, fill, openDialog, post, showErr, sleep, toast, track } from "./core.js";
 import { Board, miniBoard, uciArrow, uciMarks } from "./board.js";
 import { renderDNA } from "./dna.js";
 import { bindCurrency, renderPlans } from "./plans.js";
-
-const SAMPLE = {
-  base_rating: 1850, rating_is_estimated: false, games: 214, overall_accuracy: 86.9,
-  skills: [
-    { key: "openings", label: "Openings", rating: 1892, accuracy: 91.2, moves: 1430, low_confidence: false },
-    { key: "middlegame", label: "Middlegame play", rating: 1822, accuracy: 84.6, moves: 4120, low_confidence: false },
-    { key: "endgames", label: "Endgames", rating: 1869, accuracy: 88.4, moves: 1710, low_confidence: false },
-    { key: "tactics", label: "Tactics", rating: 1834, accuracy: 85.6, moves: 640, low_confidence: false },
-    { key: "time", label: "Time management", rating: 1870, accuracy: 88.5, moves: 410, low_confidence: false },
-    { key: "converting", label: "Converting wins", rating: 1825, accuracy: 84.8, moves: 520, low_confidence: false },
-    { key: "defending", label: "Defending", rating: 1861, accuracy: 87.6, moves: 380, low_confidence: false },
-  ],
-};
+import { BAD, CLASS, evalGraph, numberedFrom } from "./views/report.js";
 
 let onSignedIn = null;
 export function initLanding(signedInCallback) {
   onSignedIn = signedInCallback;
-  renderDNA($("#heroDna"), SAMPLE, { annotate: true, animate: true });
-  new Board($("#pitchBoard"), { fen: "rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 0 6", coords: true,
-    arrows: [{ from: "f1", to: "e2", kind: "you" }, { from: "c1", to: "e3", kind: "coach" }],
-    label: "Najdorf position: you played Be2, your preparation says Be3" });
-  const rerender = () => renderPlans($("#lpPlans"), { onChoose: () => openAuth("signup") });
+  renderSample($("#sampleCard"));
+  const rerender = () => renderPlans($("#lpPlans"), { onChoose: () => openAuth("signup"), quiet: true });
   bindCurrency(rerender);
   rerender();
   bindPlatform();
@@ -35,10 +21,61 @@ export function initLanding(signedInCallback) {
   bindAuthForm();
 }
 
+// ---------------- the live sample report card (a demo game; scripts/make_sample_report.py) ----------------
+async function renderSample(host) {
+  let rep;
+  try { rep = await (await fetch("/static/sample-report.json")).json(); } catch { host.closest("figure").hidden = true; return; }
+  const moves = rep.moves;
+  const res = rep.result.replace("-", "–");
+  const boardHost = el("div", { class: "sample-board" });
+  const board = new Board(boardHost, { fen: moves[0].fen, orientation: rep.you || "white", coords: false, followCoords: false, draw: false,
+    label: "Sample game board" });
+  const note = el("p", { class: "sample-note small", "aria-live": "polite" });
+  let cur = 0;
+  const after = (i) => (moves[i + 1] ? moves[i + 1].fen : rep.final_fen || moves[i].fen);
+  function show(n) {
+    cur = Math.max(0, Math.min(moves.length, n));
+    const m = cur > 0 ? moves[cur - 1] : null;
+    if (m && BAD.includes(m.class)) {
+      board.set({ fen: m.fen, lastMove: m.ply > 0 ? moves[m.ply - 1].uci : null, arrows: [uciArrow(m.uci, "you"), uciArrow(m.best, "coach")].filter(Boolean) });
+    } else board.set({ fen: m ? after(m.ply) : moves[0].fen, lastMove: m ? m.uci : null, arrows: [] });
+    graph.mark(cur);
+    for (const b of chips) b.setAttribute("aria-pressed", String(Number(b.dataset.ply) + 1 === cur));
+    if (!m) { fill(note, "Start position."); return; }
+    const [sym, label, tone] = CLASS[m.class];
+    fill(note, el("b", { class: "mono", text: `${m.move_number}${m.color === "white" ? "." : "…"}${m.san}` }), sym ? el("b", { class: `mono sym ${tone}`, text: sym }) : null,
+      " ", el("span", { class: `cls-word ${tone}`, text: label }),
+      BAD.includes(m.class) && m.best_san ? el("span", { class: "muted", text: ` · better was ${m.best_san}` }) : "");
+  }
+  const graph = evalGraph(rep, { you: rep.you, pro: false, onPick: show });
+  graph.node.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") { show(cur + (e.key === "ArrowRight" ? 1 : -1)); e.preventDefault(); }
+  });
+  const chips = rep.key_moments.map((k) => {
+    const [sym, , tone] = CLASS[k.class];
+    return el("button", { type: "button", class: "sample-chip", "data-ply": String(k.ply), "aria-pressed": "false", onclick: () => show(k.ply + 1) },
+      el("span", { class: "mono", text: k.label }), el("b", { class: `mono sym ${tone}`, text: sym }));
+  });
+  const cell = (c) => el("div", { class: `rc-cell${rep.you === c ? " you" : ""}` },
+    el("dt", {}, el("span", { class: "rc-name", text: c === rep.you ? "You" : "Opponent" }), el("span", { class: "rc-side", text: c === "white" ? "White" : "Black" })),
+    el("dd", { class: "rc-figure" }, el("span", { class: "figure", text: `${rep.sides[c].accuracy}%` }),
+      el("span", { class: `grade small g-${rep.sides[c].grade}`, text: rep.sides[c].grade })));
+  fill(host,
+    el("p", { class: "sample-verdict", text: rep.verdict }),
+    el("dl", { class: "rc-scores" },
+      el("div", { class: "rc-cell rc-result" }, el("dt", { text: "Result" }), el("dd", { class: "rc-figure" }, el("span", { class: "figure", text: res }))),
+      cell("white"), cell("black")),
+    graph.node,
+    el("div", { class: "sample-row" }, boardHost, el("div", { class: "sample-side" }, note,
+      el("p", { class: "tiny muted", text: "Key moments" }), el("div", { class: "sample-chips" }, ...chips))));
+  const worst = rep.key_moments.reduce((a, b) => (b.loss > a.loss ? b : a), rep.key_moments[0]);
+  show(worst ? worst.ply + 1 : 0);
+}
+
 export function showLanding() {
   $("#app").hidden = true;
   $("#landing").hidden = false;
-  document.title = "Plateau Breaker: find what's costing you rating";
+  document.title = "Plateau Breaker: see what is holding your rating back";
 }
 
 // ---------------- the instant preview ----------------
@@ -97,15 +134,19 @@ async function runPreview() {
 }
 
 function renderPreview(out, p) {
-  S.pendingLink = { platform: p.platform, handle: p.handle };
+  const m = p.moment;
+  S.pendingLink = { platform: p.platform, handle: p.handle, game_id: m && m.game_id, opponent: m && m.opponent };
+  // One primary action at a time: the hero's button steps back once there's a report card to go and get.
+  const heroBtn = $("#pvBtn");
+  heroBtn.className = "btn quiet";
+  heroBtn.textContent = "Try another username";
   const dnaHost = el("div");
   renderDNA(dnaHost, p.dna, { annotate: true, animate: true });
   const findings = el("ol", { class: "findings" }, ...(p.insights.length ? p.insights.map((i) =>
     el("li", { class: i.severity }, el("b", { class: "stat figure", text: i.stat }), el("span", { text: i.text })))
     : [el("li", {}, el("span"), el("span", { class: "muted", text: "Play a few more rated games for findings." }))]));
   let momentBlock = null;
-  if (p.moment) {
-    const m = p.moment;
+  if (m) {
     momentBlock = el("div", { class: "stack" }, el("h3", { text: "Your costliest moment" }),
       el("div", { class: "row", style: { alignItems: "flex-start", gap: "16px" } },
         miniBoard(m.fen, { arrows: [uciArrow(m.played_uci, "you"), uciArrow(m.best_uci, "coach")].filter(Boolean),
@@ -114,14 +155,16 @@ function renderPreview(out, p) {
           el("p", {}, `Move ${m.move} against ${m.opponent}: you lost `, el("b", { text: `${m.winning_chances_lost}%` }), " of your winning chances."),
           el("p", {}, "Blue is what you played. The engine's move, in red: ", el("b", { text: m.engine_best }), m.engine_line && m.engine_line.length > 1 ? ` (${m.engine_line.join(" ")})` : ""))));
   }
+  const cta = el("div", { class: "preview-cta" },
+    el("p", {}, el("b", { text: m ? `Next: the full report card for your game against ${m.opponent}. ` : "Next: your full report cards. " }),
+      "Every move checked, the moments that decided it, and what to take into your next game. Free; about a minute after you sign up."),
+    el("button", { class: "btn", type: "button", text: m ? "Get the full report card for this game" : "Create a free account", onclick: () => openAuth("signup") }));
   out.replaceChildren(
     el("div", { class: "section-head" }, el("div", {}, el("h2", { text: `${p.handle}: rated ${p.dna.base_rating}` }),
-      el("p", { class: "muted small", text: `From your last ${p.games} rated games, at a quick engine depth. A full account analyses up to 500 of your games more deeply.` }))),
+      el("p", { class: "muted small", text: `A first look at your last ${p.games} rated games, at a quick engine depth.` }))),
+    cta,
     el("div", { class: "preview-grid" }, el("div", { class: "sheet" }, dnaHost),
-      el("div", { class: "sheet stack-lg" }, el("div", { class: "stack" }, el("h3", { text: "What's costing you" }), findings), momentBlock)),
-    el("div", { class: "preview-cta" },
-      el("p", {}, el("b", { text: "Get the full picture: " }), "all your games, puzzles from your own mistakes, a weekly plan and the AI coach."),
-      el("button", { class: "btn", type: "button", text: "Create a free account", onclick: () => openAuth("signup") })));
+      el("div", { class: "sheet stack-lg" }, el("div", { class: "stack" }, el("h3", { text: "What's costing you" }), findings), momentBlock)));
 }
 
 // ---------------- sign in / sign up / forgot / reset ----------------
@@ -157,7 +200,9 @@ function setMode(m) {
   const lead = $("#authLead");
   lead.hidden = !(m === "forgot" || (m === "signup" && S.pendingLink));
   lead.textContent = m === "forgot" ? "Enter your email and we'll send a link to choose a new password."
-    : S.pendingLink ? `We'll link ${S.pendingLink.handle} and analyse your games as soon as you're in.` : "";
+    : S.pendingLink ? (S.pendingLink.game_id
+      ? `We'll link ${S.pendingLink.handle} and open the report card for your game against ${S.pendingLink.opponent} as soon as you're in.`
+      : `We'll link ${S.pendingLink.handle} and analyse your games as soon as you're in.`) : "";
   showErr($("#authErr"), "");
   $("#authOk").hidden = true;
 }

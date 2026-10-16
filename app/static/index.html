@@ -32,9 +32,9 @@
   <main id="main">
     <div class="wrap">
       <section class="hero">
-        <div>
-          <h1 class="display">Find the part of your game that's costing you rating.</h1>
-          <p class="lede">Enter your Lichess or Chess.com username. Stockfish checks your recent games and rates you skill by skill: openings, middlegame, endgames, tactics, time, converting and defending.</p>
+        <div class="hero-copy">
+          <h1 class="display">See exactly what is holding your rating back.</h1>
+          <p class="lede">Give us your username. In about two minutes you'll have a report card for one of your own games: every move checked by Stockfish and marked up the way a coach would.</p>
           <form id="previewForm" class="preview-form" novalidate>
             <div class="seg pv-platform" role="group" aria-label="Where you play" id="pvPlatform">
               <button type="button" data-platform="lichess" aria-pressed="true">Lichess</button>
@@ -42,46 +42,49 @@
             </div>
             <label class="label" for="pvUser" id="pvLabel">Your Lichess username</label>
             <div class="inline">
-              <input id="pvUser" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. aanletsgo" maxlength="30" required>
-              <button class="btn" id="pvBtn" type="submit">Diagnose my games</button>
+              <input id="pvUser" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="Lichess username" maxlength="30" required>
+              <button class="btn" id="pvBtn" type="submit">Analyse my games</button>
             </div>
-            <p class="hint">Free and no account needed. It takes about half a minute.</p>
             <p id="pvErr" class="err" role="alert" hidden></p>
           </form>
+          <ol class="lp-steps" aria-label="How long it takes">
+            <li><b>A first look at your games</b><span>about 15 seconds, no account</span></li>
+            <li><b>A free account</b><span>an email and a password</span></li>
+            <li><b>Your first report card</b><span>about a minute later</span></li>
+          </ol>
         </div>
-        <figure class="hero-dna" aria-labelledby="heroCap">
-          <figcaption id="heroCap"><b>Rating DNA</b><span class="small faint">Example: a 1850 player</span></figcaption>
-          <div id="heroDna"></div>
+        <figure class="lp-sample" aria-labelledby="sampleCap">
+          <div id="sampleCard" class="sample-card"></div>
+          <figcaption id="sampleCap" class="small muted">A sample report card from a demo game. Drag along the graph or pick a key moment.</figcaption>
         </figure>
       </section>
 
       <section id="previewOut" class="preview-out" aria-live="polite" hidden></section>
 
-      <section id="how" class="lp-section">
-        <h2>Everything here starts from your own games.</h2>
-        <p class="lede">Game review explains one game. Plateau Breaker reads all of them, finds the habit that costs you the most, and keeps working on it with you.</p>
-        <div class="jobs">
-          <div class="job"><h3>Diagnose</h3><p>A rating for each of 7 skills from every move you've played, and the habits behind your losses.</p>
-            <ul><li>Rating DNA across hundreds of games</li><li>Every game on a board, mistakes marked</li><li>Over-the-board games from a photo of your scoresheet, marked like a test paper: a report card for every game</li></ul></div>
-          <div class="job"><h3>Train</h3><p>Your own mistakes come back as puzzles until you stop making them, and a Twin of you predicts the ones you'll make next.</p>
-            <ul><li>Puzzles predicted for you: the mistakes you haven't made yet</li><li>"Think here": learn when a position needs a long think</li><li>Spaced repetition: 1, 3, 7, 14, 30 days</li></ul></div>
-          <div class="job"><h3>Prepare</h3><p>Check your ChessBase repertoire against the games you actually played, and scout your next opponent.</p>
-            <ul><li>Where you forgot your prep</li><li>Opponent moves your prep doesn't cover</li><li>Their weak lines and habits</li></ul></div>
-          <div class="job"><h3>Coach</h3><p>Ask anything about your play. Every move and evaluation in an answer is checked against your games first.</p>
-            <ul><li>Links to the exact positions</li><li>Anything unverified is flagged</li></ul></div>
+      <!-- Social proof: placeholders. Replace with real quotes and numbers (with the players' permission) before launch. -->
+      <section id="proof" class="lp-section lp-proof" aria-labelledby="proofTitle">
+        <h2 id="proofTitle">What club players say</h2>
+        <div class="proof-stats">
+          <p class="placeholder"><b>[N]</b><span>games analysed</span></p>
+          <p class="placeholder"><b>[N]</b><span>report cards written</span></p>
+          <p class="placeholder"><b>[N]</b><span>players improving</span></p>
+        </div>
+        <div class="proof-quotes">
+          <figure class="placeholder"><blockquote>[A short quote from a club player about their first report card.]</blockquote><figcaption>[Name], [rating] · [club or city]</figcaption></figure>
+          <figure class="placeholder"><blockquote>[A quote about the puzzles made from their own mistakes.]</blockquote><figcaption>[Name], [rating] · [club or city]</figcaption></figure>
+          <figure class="placeholder"><blockquote>[A quote from a coach who uses it with students.]</blockquote><figcaption>[Name], [title] · [academy]</figcaption></figure>
         </div>
       </section>
 
-      <section class="lp-section prep-pitch">
-        <div class="stack">
-          <h2>Built for the night before round one.</h2>
-          <p class="lede">Upload the repertoire you keep in ChessBase. We compare it with every game you've played and show where you left your own preparation, which replies it doesn't cover, and which lines end badly. Then we drill those positions.</p>
-          <p class="muted">Before a tournament, the Event Pass gives you Pro for 10 days to scout every opponent.</p>
+      <section id="how" class="lp-section">
+        <h2>Everything here starts from your own games.</h2>
+        <p class="lede">A game review explains a single game. Plateau Breaker studies all of them, finds the habits that cost you the most points, and builds your training around them.</p>
+        <div class="jobs">
+          <div class="job"><h3>Diagnose</h3><p>A report card for any game, and a rating for each of seven skills from every move you've played.</p></div>
+          <div class="job"><h3>Train</h3><p>Your own mistakes come back as puzzles, at growing intervals, until the pattern is fixed.</p></div>
+          <div class="job"><h3>Prepare</h3><p>Check your repertoire against the games you actually played, and study your next opponent.</p></div>
+          <div class="job"><h3>Coach</h3><p>Ask about your play in plain language. Every move and evaluation in an answer is checked against your games.</p></div>
         </div>
-        <figure class="demo-board" style="margin:0">
-          <div id="pitchBoard" class="board"></div>
-          <figcaption class="board-foot"><span class="legend-ink"><span><i style="background:#2b44c9"></i>You played</span><span><i style="background:#c9372c"></i>Your prep says</span></span></figcaption>
-        </figure>
       </section>
 
       <section id="plans" class="lp-section">

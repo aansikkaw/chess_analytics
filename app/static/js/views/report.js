@@ -12,7 +12,7 @@ import { followJob } from "./common.js";
 
 // Move classes: the standard symbols with our own words (DESIGN.md: never another site's move tiers or colours).
 // Tone: "err" is the coach's red pen, "good" is ink, "plain" carries no mark.
-const CLASS = {
+export const CLASS = {
   brilliant: ["!!", "Sound sacrifice", "good"], great: ["!", "Only good move", "good"], best: ["", "Engine's choice", "plain"],
   excellent: ["", "Good", "plain"], good: ["", "Good", "plain"], book: ["", "Book move", "plain"], forced: ["□", "Only move", "plain"],
   inaccuracy: ["?!", "Inaccuracy", "err"], mistake: ["?", "Mistake", "err"], miss: ["?", "Didn't punish", "err"],
@@ -22,7 +22,7 @@ const FEATURE_LINK = { predicted: "#/train/predicted", think: "#/train/think", m
   prepare: "#/prepare" };
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
 const num = (m) => `${m.move_number}${m.color === "white" ? "." : "..."}`;
-const BAD = ["inaccuracy", "mistake", "miss", "blunder"];
+export const BAD = ["inaccuracy", "mistake", "miss", "blunder"];
 /** Guided view: one habit to take away, from what went wrong on the move. */
 const TIPS = {
   allowed_mate: "Before going after material, check that your king is safe.",
@@ -37,7 +37,7 @@ const TOUR_KEY = "pb:tour:report:v1";
 const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 /** "12.Nxe6 Qc8 13.Nxf8", or "12…Nxg6 13.Qh5" when Black moves first, numbered from `fen`. */
-function numberedFrom(fen, sans) {
+export function numberedFrom(fen, sans) {
   const [side, , , , , full] = fen.split(" ");
   let n = Number(full) || 1, white = side !== "b";
   return sans.map((san, i) => {
@@ -107,10 +107,9 @@ async function load(body, accountId, gameId, head) {
   try { d = await api(url); } catch (e) { body.replaceChildren(el("p", { class: "err", text: e.message })); return; }
   if (!body.isConnected) return;
   const progress = el("div", { class: "report-progress" });
-  if (d.state === "importing") {
-    fill(body, el("div", { class: "empty stack" }, el("h3", { text: "Analysing your game" }),
-      el("p", { text: "Stockfish is going through the moves. The report card opens as soon as it's done." }), progress));
-    followJob(progress, d.job_id, () => load(body, accountId, gameId, head));
+  if (d.state === "importing") { // a new account: this game is fetched and analysed first, then marked up
+    fill(body, waitSteps(1, "Your game is first in line: the rest of your games keep importing behind it."));
+    setTimeout(() => { if (body.isConnected) load(body, accountId, gameId, head); }, 1500);
     return;
   }
   if (d.state === "none") {
@@ -121,13 +120,21 @@ async function load(body, accountId, gameId, head) {
     } catch (e) { body.replaceChildren(el("p", { class: "err", text: e.message })); return; }
   }
   if (d.state === "running") {
-    fill(body, el("div", { class: "empty stack" }, el("h3", { text: "Reviewing the game" }),
-      el("p", { text: "Checking both players' moves with Stockfish (top two choices in every position), then your coach writes it up. About half a minute." }),
-      progress));
+    fill(body, waitSteps(2, "Both players' moves, with Stockfish's top two choices in every position. About half a minute."), progress);
     followJob(progress, d.job_id, () => load(body, accountId, gameId, head));
     return;
   }
   draw(body, d, accountId, gameId, url, head);
+}
+
+/** While a report card is being made: the three steps, with the current one marked. */
+function waitSteps(step, detail) {
+  const steps = ["Getting your game", "Checking every move", "Your coach writes it up"];
+  return el("div", { class: "sheet wait-steps", role: "status" },
+    el("h2", { text: "Your report card is on its way" }),
+    el("ol", {}, ...steps.map((t, i) => el("li", { class: i + 1 < step ? "done" : i + 1 === step ? "now" : "", "aria-current": i + 1 === step ? "step" : null },
+      el("span", { class: "wait-n", "aria-hidden": "true", text: i + 1 < step ? "✓" : String(i + 1) }), el("span", { text: t })))),
+    el("p", { class: "small muted", text: detail }));
 }
 
 function draw(body, d, accountId, gameId, url, head) {
@@ -606,7 +613,7 @@ function coachCard(d, url, reload, jump) {
 
 /** The evaluation graph, as a slider you can scrub: drag along it (or use the arrow keys) and the board follows.
  *  Guided: your winning chances, labelled in words. Pro: White's side, with ±1 and ±3 pawns marked. */
-function evalGraph(rep, { you, pro, onPick }) {
+export function evalGraph(rep, { you, pro, onPick }) {
   const s = rep.series;
   const n = Math.max(1, s.length - 1);
   const persp = pro ? "white" : you || "white";

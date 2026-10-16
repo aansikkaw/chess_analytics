@@ -40,8 +40,9 @@ export async function startApp({ fresh = false } = {}, onSignOut) {
   renderBanners();
   bindShellOnce();
   // A username tried in the preview is linked only for a brand-new account, never added to an existing one.
-  if (S.pendingLink && fresh) await linkPending();
+  const opened = S.pendingLink && fresh ? await linkPending() : false;
   S.pendingLink = null;
+  if (opened) return; // straight to the report card the preview pointed at
   if (!location.hash || location.hash === "#") location.hash = "#/diagnose";
   else route();
   const running = S.me.accounts.find((a) => a.running_job);
@@ -61,6 +62,8 @@ async function joinPendingInvite() {
   } catch (e) { toast(e.message, 7000); return false; }
 }
 
+/** Link the account tried in the preview and start importing. When the preview found a costliest game, that game is
+ *  imported first and its report card opens straight away (the fast path to a first report card). True if it did. */
 async function linkPending() {
   const p = S.pendingLink;
   S.pendingLink = null;
@@ -69,8 +72,15 @@ async function linkPending() {
     await refreshMe();
     selectAccount(a.id, { silent: true });
     track("Account linked", { platform: p.platform });
+    if (p.game_id) {
+      history.replaceState(null, "", `#/report/${a.id}/${encodeURIComponent(p.game_id)}`);
+      await startSync(a, { first_game_id: p.game_id }); // its route() draws the report card's waiting steps
+      track("Signup to report card");
+      return true;
+    }
     startSync(a);
   } catch (e) { toast(e.message, 6000); }
+  return false;
 }
 
 export async function refreshMe() {
@@ -269,7 +279,7 @@ export async function pollJob(jobId, accountId) {
       shownFirst = true;
       refreshedAt = j.done || 0;
       await refreshMe();
-      if (S.accountId === accountId) { S.profile = null; route(); toast("Your first results are in. The rest are still being analysed."); }
+      if (S.accountId === accountId && onDashboard()) { S.profile = null; route(); toast("Your first results are in. The rest are still being analysed."); }
     }
     if (j.state === "error") { toast(j.error, 8000); break; }
     if (j.state === "done") {
@@ -285,8 +295,9 @@ export async function pollJob(jobId, accountId) {
   bar.hidden = true;
   fill.style.width = "0";
   await refreshMe().catch(() => {});
-  if (S.accountId === accountId) { S.profile = null; route(); }
+  if (S.accountId === accountId) { S.profile = null; if (onDashboard()) route(); } // never redraw a page you're reading
 }
+const onDashboard = () => (location.hash.replace(/^#\/?/, "").split("/")[0] || "diagnose") === "diagnose";
 
 // About 2 seconds of engine time per game; the dashboard fills in after the first 20.
 function timeEstimate(n) {

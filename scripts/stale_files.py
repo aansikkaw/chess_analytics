@@ -136,6 +136,7 @@ app/static/pieces/chessnut/wN.svg
 app/static/pieces/chessnut/wP.svg
 app/static/pieces/chessnut/wQ.svg
 app/static/pieces/chessnut/wR.svg
+app/static/sample-report.json
 app/static/status.html
 app/static/sw.js
 app/static/vendor/chess.js
@@ -168,6 +169,7 @@ scripts/coach_check.py
 scripts/import_puzzles.py
 scripts/make_demo_pgn.py
 scripts/make_puzzle_sample.py
+scripts/make_sample_report.py
 scripts/setup_ollama.sh
 scripts/stale_files.py
 scripts/start_ollama.sh

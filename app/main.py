@@ -397,6 +397,7 @@ class SyncRequest(BaseModel):
     max_games: int | None = Field(None, ge=1, le=500)
     time_classes: list[str] | None = None
     full: bool = False
+    first_game_id: str | None = Field(None, max_length=120)  # analyse this game first, alone (sign-up straight to its report card)
 
 
 class PgnRequest(BaseModel):
@@ -740,7 +741,9 @@ def unlink_account(account_id: int, user: dict = Depends(current_user)) -> dict:
 
 def _start_import(user: dict, acct: dict, **payload) -> dict:
     imports_allowed()
-    job_id = jobs.submit("import", payload, user["id"], acct["id"], exclusive=True)  # atomic: no double imports
+    # A new user waiting on one game's report card: its first turn jumps the line (the boost ends when it re-queues).
+    boost = 2 if payload.get("first_game_id") else None
+    job_id = jobs.submit("import", payload, user["id"], acct["id"], priority=boost, exclusive=True)  # atomic: no double imports
     if job_id is None:
         raise HTTPException(409, "This account is already syncing.")
     return {"job_id": job_id}
@@ -760,7 +763,7 @@ def sync_account(account_id: int, body: SyncRequest, user: dict = Depends(verifi
     want = min(body.max_games or cap, cap)
     # Asking for more games than are already analysed means "go back through my history", not just "anything new".
     backfill = body.full or want > store.count_games(player_key(acct))
-    return _start_import(user, acct, max_games=want, time_classes=classes, full=backfill)
+    return _start_import(user, acct, max_games=want, time_classes=classes, full=backfill, first_game_id=body.first_game_id)
 
 
 @app.post("/api/accounts/{account_id}/pgn")

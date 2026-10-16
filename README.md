@@ -570,6 +570,13 @@ ruff check .
 
 The demo data (`sample_data/demo_games.pgn`) is 40 synthetic games for `demo_player`. Use real games to judge the product.
 
+## The landing page's sample report card
+
+`app/static/sample-report.json` is the interactive sample on the landing page. It's built from a synthetic demo game
+(`sample_data/demo_games.pgn`), so no real player appears; rebuild it after changing the report format with
+`python scripts/make_sample_report.py`. The social-proof quotes and numbers on the landing page are placeholders in
+`app/static/index.html`: replace them with real ones (with the players' permission) before launch.
+
 ## Third-party files
 
 chess.js (BSD-2-Clause, `app/static/vendor/`), the Chessnut piece set by Alexis Luengas (Apache-2.0,

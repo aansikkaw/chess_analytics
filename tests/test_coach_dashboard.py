@@ -251,6 +251,85 @@ def test_asking_for_more_games_goes_back_through_history(m, monkeypatch):
         assert m.store.count_games(m.player_key(m.store.account(a["id"]))) == 6
 
 
+@needs_engine
+def test_sync_can_put_one_game_first_for_a_fast_report_card(m, monkeypatch):
+    """Sign-up straight to a report card: the preview's game is analysed alone, first, so its report can start at once."""
+    import dataclasses
+
+    games = parse_pgn(DEMO, "demo_player")[:6]
+    newest_first = sorted(games, key=lambda g: g.played_at, reverse=True)
+    target = newest_first[-1].game_id  # the oldest: it would normally be analysed last
+    monkeypatch.setattr("app.main.check_account", lambda platform, name: name)
+    monkeypatch.setattr("app.sync.fetch_games", lambda platform, handle, n, classes, since=None: games[:n])
+    monkeypatch.setattr(m, "settings", dataclasses.replace(m.settings, max_games=6))
+    monkeypatch.setattr(m.importer, "settings", dataclasses.replace(m.settings, import_chunk=3))
+    saved, stages, partials = [], [], []
+    real_save, real_requeue = m.store.save_games, m.queue.requeue
+    monkeypatch.setattr(m.store, "save_games", lambda key, gs: (saved.append([g.game_id for g in gs]), real_save(key, gs))[1])
+    def spy_requeue(job_id, payload=None, delay=0.0, stage=None):
+        stages.append(stage)
+        return real_requeue(job_id, payload, delay, stage)
+    monkeypatch.setattr(m.queue, "requeue", spy_requeue)
+    real_merge = m.queue.merge_result
+    monkeypatch.setattr(m.queue, "merge_result", lambda job_id, **r: (partials.append(dict(r)), real_merge(job_id, **r))[1])
+    with client(m, "fastfirst@test.com") as c:
+        a = c.post("/api/accounts", json={"platform": "lichess", "handle": "demo_player"}).json()
+        j = c.post(f"/api/accounts/{a['id']}/sync", json={"max_games": 6, "first_game_id": target}).json()
+        assert c.get(f"/api/jobs/{j['job_id']}").json()["state"] == "done"
+    assert saved[0] == [target]  # alone, first
+    assert sorted(sum(saved, [])) == sorted(g.game_id for g in games)  # and every game still imported once
+    assert stages == ["Analysed 1 of 6; continuing shortly", "Analysed 4 of 6; continuing shortly"]
+    firsts = [i for i, r in enumerate(partials) if r.get("first_results")]
+    assert len(firsts) == 1  # "first results" waits for a real batch, not the single game
+
+
+@needs_engine
+def test_import_steps_aside_for_a_waiting_report_card(m, monkeypatch):
+    """A report card someone is waiting for doesn't queue behind a 20-game batch: the import yields after the current game."""
+    import dataclasses
+
+    games = parse_pgn(DEMO, "demo_player")[:4]
+    monkeypatch.setattr("app.main.check_account", lambda platform, name: name)
+    monkeypatch.setattr("app.sync.fetch_games", lambda platform, handle, n, classes, since=None: games[:n])
+    monkeypatch.setattr(m, "settings", dataclasses.replace(m.settings, max_games=4))
+    monkeypatch.setattr(m.importer, "settings", dataclasses.replace(m.settings, import_chunk=20))
+    monkeypatch.setattr(m.queue, "interactive_waiting", lambda: True)  # someone is always waiting for a report card
+    stages, saved = [], []
+    real_requeue, real_save = m.queue.requeue, m.store.save_games
+    def spy_requeue(job_id, payload=None, delay=0.0, stage=None):
+        stages.append(stage)
+        return real_requeue(job_id, payload, delay, stage)
+    monkeypatch.setattr(m.queue, "requeue", spy_requeue)
+    monkeypatch.setattr(m.store, "save_games", lambda key, gs: (saved.append(len(gs)), real_save(key, gs))[1])
+    with client(m, "yield@test.com") as c:
+        a = c.post("/api/accounts", json={"platform": "lichess", "handle": "demo_player"}).json()
+        j = c.post(f"/api/accounts/{a['id']}/sync", json={"max_games": 4}).json()
+        assert c.get(f"/api/jobs/{j['job_id']}").json()["state"] == "done"
+        assert m.store.count_games(m.player_key(m.store.account(a["id"]))) == 4  # nothing lost
+    assert saved == [1, 1, 1, 1]  # one game per turn while a report card waits, instead of one batch of 4
+    assert stages[:3] == ["Analysed 1 of 4; continuing shortly", "Analysed 2 of 4; continuing shortly", "Analysed 3 of 4; continuing shortly"]
+
+
+def test_interactive_waiting_sees_only_queued_report_cards(tmp_path):
+    from app.jobs import JobQueue
+
+    q = JobQueue(str(tmp_path / "q.db"))
+    assert not q.interactive_waiting()
+    q.enqueue("import", {}, user_id=1)
+    assert not q.interactive_waiting()
+    r = q.enqueue("review", {}, user_id=2)
+    assert q.interactive_waiting()
+    q.claim("w1"), q.claim("w2")  # both taken: nothing is waiting any more
+    assert not q.interactive_waiting() and q.get(r)["state"] == "running"
+    first = q.enqueue("import", {"first_game_id": "g1"}, user_id=3, priority=2)  # a new user's first game counts too
+    assert q.interactive_waiting()
+    q.claim("w3")
+    q.requeue(first, {"pending": []})
+    assert q.get(first)["priority"] == 5 and not q.interactive_waiting()  # the boost lasts one turn
+    q.enqueue("preview", {"key": "x"})
+    assert not q.interactive_waiting()  # previews have their own lane
+
+
 def test_plan_requests_and_grants_send_emails(m, capsys, tmp_path, monkeypatch):
     import importlib.util
     from pathlib import Path

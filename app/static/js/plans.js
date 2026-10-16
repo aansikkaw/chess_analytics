@@ -8,7 +8,7 @@ export async function loadPlans() {
   return cache;
 }
 
-export async function renderPlans(host, { onChoose } = {}) {
+export async function renderPlans(host, { onChoose, quiet = false } = {}) {  // quiet: no filled button (the landing page has one primary action)
   let plans;
   try { plans = await loadPlans(); } catch (e) { host.replaceChildren(el("p", { class: "err", text: e.message })); return; }
   const cur = currency();
@@ -21,8 +21,8 @@ export async function renderPlans(host, { onChoose } = {}) {
     let action;
     if (current === p.id) action = el("span", { class: "tag ok", text: "Your plan" });
     else if (p.id === "free") action = S.me ? null : el("button", { class: "btn quiet", type: "button", text: "Start free", onclick: () => onChoose && onChoose(p) });
-    else action = el("button", { class: p.featured ? "btn" : "btn quiet", type: "button",
-      text: p.waitlist ? "Join the waitlist" : p.id === "event" ? "Get an Event Pass" : "Choose Pro",
+    else action = el("button", { class: p.featured && !quiet ? "btn" : "btn quiet", type: "button",
+      text: p.waitlist ? "Join the waitlist" : p.id === "event" ? "Get an Event Pass" : p.id === "coach" ? "Choose Coach" : "Choose Pro",
       onclick: (e) => (onChoose ? onChoose(p, e.currentTarget) : requestPlan(p, e.currentTarget)) });
     return el("div", { class: `plan${p.featured ? " featured" : ""}` },
       el("h3", { text: p.name }),
