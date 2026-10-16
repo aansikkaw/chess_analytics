@@ -1,7 +1,7 @@
 // The chessboard. Real pieces (Chessnut set, Apache-2.0), drag or click to move with legal-move dots,
 // last-move and check highlights, animated moves, a promotion picker, move sounds, right-click arrows
-// and circles, and colour themes. Rules for the board's own hints come from chess.js (BSD-2-Clause);
-// the server still grades every puzzle answer.
+// and circles, colour themes, two piece sets and a coordinates switch. Rules for the board's own hints come
+// from chess.js (BSD-2-Clause); the server still grades every puzzle answer. Look and timings: DESIGN.md.
 //
 // Arrows keep their meaning across the app: blue = you, red = coach/engine, green = drawn by hand.
 
@@ -11,7 +11,12 @@ import { store } from "./core.js";
 const FILES = "abcdefgh";
 const PIECES = "/static/pieces/chessnut";
 const EMPTY = "8/8/8/8/8/8/8/8 w - - 0 1";
-export const THEMES = { green: "Green", brown: "Wood", blue: "Ice", slate: "Slate" };
+// Our own board colours (DESIGN.md: never Chess.com's or Lichess's). Old saved choices map to the nearest one.
+export const THEMES = { slate: "Slate", graphite: "Graphite", walnut: "Walnut", paper: "Paper" };
+const OLD_THEMES = { green: "slate", blue: "slate", brown: "walnut" };
+// Chessnut: drawn pieces (Apache-2.0). Print: the book-diagram glyphs of the Pieces font (OFL), already loaded for the menu.
+export const PIECE_SETS = { chessnut: "Chessnut", print: "Print" };
+const GLYPH = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
 const reduceMotion = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 export function parseFen(fen) {
@@ -31,11 +36,32 @@ const pieceUrl = (p) => `${PIECES}/${colorOf(p) === "white" ? "w" : "b"}${p.toUp
 const isSq = (s) => typeof s === "string" && /^[a-h][1-8]$/.test(s);
 
 // ---- settings ---------------------------------------------------------------------------
-export const boardTheme = () => (THEMES[store.get("pb:boardTheme")] ? store.get("pb:boardTheme") : "green");
+export const boardTheme = () => { const t = store.get("pb:boardTheme"); return THEMES[t] ? t : OLD_THEMES[t] || "slate"; };
 export function setBoardTheme(t) {
   if (!THEMES[t]) return;
   store.set("pb:boardTheme", t);
   for (const b of document.querySelectorAll(".board")) b.dataset.theme = t;
+}
+export const pieceSet = () => (PIECE_SETS[store.get("pb:pieces")] ? store.get("pb:pieces") : "chessnut");
+export function setPieceSet(set) {
+  if (!PIECE_SETS[set]) return;
+  store.set("pb:pieces", set);
+  for (const b of liveBoards()) b.redrawPieces();
+}
+/** Coordinates on full-size boards: your saved choice, else `fallback` (a page's default, e.g. on in Pro view). */
+export const coordsPref = (fallback = true) => { const v = store.get("pb:coords"); return typeof v === "boolean" ? v : fallback; };
+export function setCoordsPref(on) {
+  store.set("pb:coords", !!on);
+  for (const b of liveBoards()) if (b.followCoords) b.set({ coords: !!on });
+}
+// Boards on screen, so a settings change applies everywhere at once. A board whose page was left drops out.
+const LIVE = new Set();
+function liveBoards() {
+  const out = [];
+  for (const b of LIVE) {
+    if (b.host.isConnected) { b.seen = true; out.push(b); } else if (b.seen) LIVE.delete(b);
+  }
+  return out;
 }
 export const soundEnabled = () => store.get("pb:sound") !== false;
 export const setSoundEnabled = (on) => store.set("pb:sound", !!on);
@@ -120,13 +146,16 @@ export class Board {
    *   arrows [{from,to,kind:"you"|"coach"|"draw"}], marks {sq: "you"|"coach"|"last"|"sel"|"hint"},
    *   lastMove (uci), badge {sq, kind:"correct"|"wrong"|"best"|"good"}, draw (right-click arrows, default on
    *   for full-size boards), onMove(from, to, info) called after a legal move, autoApply (default true:
-   *   the board shows the move at once), label (accessible name).
+   *   the board shows the move at once), label (accessible name), mini (a small static board: no settings follow it),
+   *   followCoords (coords follow the Board menu even though the page set a default).
    */
   constructor(host, o = {}) {
     this.host = host;
-    this.o = { fen: EMPTY, orientation: "white", coords: true, interactive: false, locked: false, arrows: [], marks: {},
+    this.o = { fen: EMPTY, orientation: "white", coords: o.mini ? false : coordsPref(true), interactive: false, locked: false, arrows: [], marks: {},
       lastMove: null, badge: null, autoApply: true, ...o };
-    if (this.o.draw === undefined) this.o.draw = this.o.coords !== false;
+    if (this.o.draw === undefined) this.o.draw = !o.mini && o.coords !== false;
+    this.followCoords = !o.mini && (!("coords" in o) || !!o.followCoords);
+    if (!o.mini) LIVE.add(this);
     this.sel = null;
     this.drawn = [];
     this.pieceEls = new Map();
@@ -193,6 +222,7 @@ export class Board {
   }
   pieceAt(sq) { return parseFen(this.o.fen)[sq]; }
   updateLabel() {
+    this.host.dataset.fen = this.o.fen; // the position on the board, for tools and tests
     const turn = sideToMove(this.o.fen);
     this.host.setAttribute("role", "img");
     this.host.setAttribute("aria-label", this.o.label || `Chess position, ${turn} to move`);
@@ -202,8 +232,15 @@ export class Board {
   makePiece(p) {
     const d = document.createElement("div");
     d.className = `b-piece ${colorOf(p)[0]}${p.toLowerCase()}`;
-    d.style.backgroundImage = `url(${pieceUrl(p)})`;
+    if (!this.o.mini && pieceSet() === "print") { d.classList.add("glyph", colorOf(p)); d.textContent = GLYPH[p.toLowerCase()]; }
+    else d.style.backgroundImage = `url(${pieceUrl(p)})`;
     return d;
+  }
+  /** Rebuild the pieces (after the piece set changes), without animating. */
+  redrawPieces() {
+    for (const [, rec] of this.pieceEls) rec.el.remove();
+    this.pieceEls = new Map();
+    this.syncPieces(false);
   }
   place(el, sq, fromSq = null) {
     const to = this.cr(sq);
@@ -246,7 +283,7 @@ export class Board {
       }
     }
     for (const [, rec] of vanished) { // captured or removed
-      if (animate && !reduceMotion()) { rec.el.classList.add("gone"); setTimeout(() => rec.el.remove(), 200); }
+      if (animate && !reduceMotion()) { rec.el.classList.add("gone"); setTimeout(() => rec.el.remove(), 150); }
       else rec.el.remove();
     }
     for (const [sq, rec] of kept) if (!moved.has(rec)) this.place(rec.el, sq);
@@ -478,38 +515,53 @@ export class Board {
 export function miniBoard(fen, { orientation, arrows = [], marks = {}, label, large = false, lastMove = null } = {}) {
   const host = document.createElement("div");
   host.className = large ? "mini large" : "mini";
-  new Board(host, { fen, orientation: orientation || sideToMove(fen), coords: false, draw: false, arrows, marks, label, lastMove });
+  new Board(host, { fen, orientation: orientation || sideToMove(fen), coords: false, draw: false, mini: true, arrows, marks, label, lastMove });
   return host;
 }
 
 export const uciArrow = (uci, kind) => (uci && uci.length >= 4 ? { from: uci.slice(0, 2), to: uci.slice(2, 4), kind } : null);
 export const uciMarks = (uci, kind) => (uci && uci.length >= 4 ? { [uci.slice(0, 2)]: kind, [uci.slice(2, 4)]: kind } : {});
 
-/** A theme and sound picker for a board's footer. */
+/** The Board menu for a board's footer: colours, piece set, coordinates and move sounds, plus Flip.
+ *  Choices are saved in this browser and apply to every board. */
 export function boardSettings(board) {
-  const wrap = document.createElement("div");
-  wrap.className = "board-settings";
-  const sel = document.createElement("select");
-  sel.setAttribute("aria-label", "Board colours");
-  for (const [k, v] of Object.entries(THEMES)) {
-    const opt = document.createElement("option");
-    opt.value = k;
-    opt.textContent = v;
-    opt.selected = k === boardTheme();
-    sel.append(opt);
-  }
-  sel.addEventListener("change", () => setBoardTheme(sel.value));
-  const snd = document.createElement("button");
-  snd.type = "button";
-  snd.className = "link quiet small";
-  const label = () => { snd.textContent = soundEnabled() ? "Sound on" : "Sound off"; snd.setAttribute("aria-pressed", String(soundEnabled())); };
-  label();
-  snd.addEventListener("click", () => { setSoundEnabled(!soundEnabled()); label(); if (soundEnabled()) playSound("move"); });
-  const flip = document.createElement("button");
-  flip.type = "button";
-  flip.className = "link quiet small";
-  flip.textContent = "Flip board";
+  const mk = (tag, attrs = {}, ...kids) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    n.append(...kids);
+    return n;
+  };
+  const uid = board.uid();
+  const select = (id, label, options, value, onChange) => {
+    const sel = mk("select", { id });
+    for (const [k, v] of Object.entries(options)) { const opt = mk("option", { value: k }, v); opt.selected = k === value; sel.append(opt); }
+    sel.addEventListener("change", () => onChange(sel.value));
+    return mk("div", { class: "bm-row" }, mk("label", { for: id }, label), sel);
+  };
+  const check = (id, label, on, onChange) => {
+    const cb = mk("input", { type: "checkbox", id });
+    cb.checked = on;
+    cb.addEventListener("change", () => onChange(cb.checked));
+    return mk("label", { class: "check bm-check", for: id }, cb, label);
+  };
+  const menu = mk("details", { class: "board-menu" });
+  const summary = mk("summary", { class: "btn quiet small", "aria-label": "Board settings" });
+  summary.innerHTML = '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/>' +
+    '<circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>';
+  summary.append("Board");
+  const panel = mk("div", { class: "board-menu-panel" },
+    select(`bm-theme-${uid}`, "Colours", THEMES, boardTheme(), setBoardTheme),
+    select(`bm-pieces-${uid}`, "Pieces", PIECE_SETS, pieceSet(), setPieceSet),
+    check(`bm-coords-${uid}`, "Coordinates", board.o.coords !== false, (on) => { board.set({ coords: on }); setCoordsPref(on); }),
+    check(`bm-sound-${uid}`, "Move sounds", soundEnabled(), (on) => { setSoundEnabled(on); if (on) playSound("move"); }));
+  menu.append(summary, panel);
+  const close = (e) => { if (menu.open && (e.type === "keydown" ? e.key === "Escape" : !menu.contains(e.target))) { menu.open = false; if (e.type === "keydown") summary.focus(); } };
+  menu.addEventListener("toggle", () => {
+    if (menu.open) { document.addEventListener("pointerdown", close); document.addEventListener("keydown", close); }
+    else { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", close); }
+  });
+  const flip = mk("button", { type: "button", class: "link quiet small" }, "Flip board");
   flip.addEventListener("click", () => board.flip());
-  wrap.append(sel, snd, flip);
-  return wrap;
+  return mk("div", { class: "board-settings" }, menu, flip);
 }

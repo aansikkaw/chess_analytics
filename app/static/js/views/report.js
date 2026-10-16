@@ -4,8 +4,10 @@
 // Guided view (default): winning chances, the one best line, tips and a first-visit tour. Pro view: evaluations in
 // pawns, engine depth, three engine lines, coordinates, FEN/PGN copy. Same page, same data (DESIGN.md).
 
-import { api, el, evalText, fill, post, proView, store, svg, toast, track } from "../core.js";
-import { Board, boardSettings, uciArrow } from "../board.js";
+import { api, el, evalText, fill, post, proView, store, svg, toast, track, winPct } from "../core.js";
+import { Board, applyMove, boardSettings, coordsPref, uciArrow } from "../board.js";
+import { pageKeys } from "../keys.js";
+import { Chess, validateFen } from "../../vendor/chess.js";
 import { followJob } from "./common.js";
 
 const CLASS = {
@@ -31,6 +33,54 @@ const TIPS = {
   time_trouble: "Spend less time early on, so you have it for moments like this.",
 };
 const TOUR_KEY = "pb:tour:report:v1";
+const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+/** "12.Nxe6 Qc8 13.Nxf8", or "12…Nxg6 13.Qh5" when Black moves first, numbered from `fen`. */
+function numberedFrom(fen, sans) {
+  const [side, , , , , full] = fen.split(" ");
+  let n = Number(full) || 1, white = side !== "b";
+  return sans.map((san, i) => {
+    const t = white ? `${n}.${san}` : i === 0 ? `${n}…${san}` : san;
+    if (!white) n += 1;
+    white = !white;
+    return t;
+  }).join(" ");
+}
+
+/** A FEN, or a PGN (its moves, from its own start position), from pasted text; null if it's neither. */
+function parsePasted(text) {
+  const t = (text || "").trim();
+  if (!t) return null;
+  if (!t.includes("[") && validateFen(t).ok) return { rootFen: t, moves: [] };
+  const g = new Chess();
+  try { g.loadPgn(t); } catch { return null; }
+  const hist = g.history({ verbose: true });
+  if (!hist.length) return null;
+  return { rootFen: g.getHeaders().FEN || START, moves: hist.map((m) => ({ san: m.san, uci: m.from + m.to + (m.promotion || ""), fen: m.after })) };
+}
+
+let pasteDlg = null;
+/** Paste a FEN or a PGN; `done({ rootFen, moves })` with what was read. */
+function openPaste(done) {
+  if (!pasteDlg) { pasteDlg = el("dialog", { class: "narrow", "aria-labelledby": "pasteTitle" }); document.body.append(pasteDlg); }
+  const area = el("textarea", { id: "pasteText", rows: "6", spellcheck: "false", placeholder: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1\n\nor a PGN: 1. e4 e5 2. Nf3 …" });
+  const err = el("p", { class: "err small", role: "alert", hidden: true });
+  const form = el("form", { class: "stack" }, el("label", { for: "pasteText", text: "Paste a FEN (one position) or a PGN (a game)" }), area, err,
+    el("div", { class: "row" }, el("button", { class: "btn", type: "submit", text: "Show it on the board" }),
+      el("button", { class: "btn quiet", type: "button", "data-close": "", text: "Cancel" })));
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = parsePasted(area.value);
+    if (!v) { err.hidden = false; err.textContent = "That isn't a FEN or a PGN this board can read. Check it's the whole FEN (six parts) or a PGN with moves."; return; }
+    pasteDlg.close();
+    done(v);
+  });
+  fill(pasteDlg, el("div", { class: "dlg-head" }, el("h2", { id: "pasteTitle", text: "Paste a position or a game" }),
+    el("button", { class: "x", type: "button", "data-close": "", "aria-label": "Close", text: "×" })), el("div", { class: "dlg-body" }, form));
+  pasteDlg.showModal();
+  if (navigator.clipboard && navigator.clipboard.readText) navigator.clipboard.readText().then((t) => { if (!area.value && parsePasted(t)) area.value = t.trim(); }).catch(() => {});
+  area.focus();
+}
 
 /** Engine lines for a position, cached per page. `n` 1 (Guided best line) or 3 (Pro). */
 const lineCache = new Map();
@@ -87,15 +137,17 @@ function draw(body, d, accountId, gameId, url, head) {
   head.querySelector(".sub").textContent = [res, rep.date, rep.event].filter(Boolean).join(" · ");
   const moves = rep.moves;
 
-  // ---- the board and the move list ----
-  const boardHost = el("div", { class: "report-board" });
+  // ---- the analysis board: the game, your own lines, the engine (DESIGN.md: board, eval bar, move list) ----
   const pro = proView();
   body.classList.add("report-page");
-  const board = new Board(boardHost, { fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", orientation: you || "white", label: "Game board",
-    coords: pro });
+  const boardHost = el("div", { class: "report-board" });
+  const board = new Board(boardHost, { fen: START, orientation: you || "white", label: "Game board", coords: coordsPref(pro), followCoords: true,
+    interactive: true, onMove: (_f, _t, info) => played(info) });
+  const evalFill = el("div", { class: "evalbar-fill" });
+  const evalBar = el("div", { class: "evalbar-v", role: "img", "aria-label": "Evaluation" }, evalFill, el("div", { class: "evalbar-mid", "aria-hidden": "true" }));
   const note = el("div", { class: "report-note", "aria-live": "polite" });
   const list = el("ol", { class: "report-moves" });
-  const items = [];
+  const items = [], rows = [];
   for (let i = 0; i < moves.length; i += 2) {
     const li = el("li", {}, el("span", { class: "n", text: `${moves[i].move_number}.` }));
     for (const m of [moves[i], moves[i + 1]].filter(Boolean)) {
@@ -105,26 +157,73 @@ function draw(body, d, accountId, gameId, url, head) {
       items[m.ply] = b;
       li.append(b);
     }
+    rows.push(li);
     list.append(li);
   }
-  let cur = 0;
-  function go(n, { showBest = true } = {}) {
-    cur = Math.max(0, Math.min(moves.length, n));
+  const varLi = el("li", { class: "variation", hidden: true });
+
+  let cur = 0;           // plies of the game played on the board
+  let shownPly = 0;      // the game position on the board: cur, or cur - 1 while a mistake is shown with its better move
+  let vari = null;       // your own line: { rootPly (null for a pasted position), rootFen, moves: [{ san, uci, fen }], idx }
+  let exploring = false; // the board shows your line, not the game
+  let engineOn = store.get("pb:engine") !== false;
+  let lastEval = { white: null, text: "" };
+
+  const fenAfter = new Map();
+  const afterFen = (m) => {
+    if (!fenAfter.has(m.ply)) {
+      const next = moves[m.ply + 1];
+      fenAfter.set(m.ply, next ? next.fen : rep.final_fen || (applyMove(m.fen, m.uci) || {}).fen || m.fen);
+    }
+    return fenAfter.get(m.ply);
+  };
+  const gameFen = (n) => (n === 0 ? (moves.length ? moves[0].fen : START) : afterFen(moves[n - 1]));
+
+  /** The bar beside the board: the bottom side's winning chances, filled from the bottom. `white` is 0-100 or null (unknown). */
+  function setEval(white, text) {
+    lastEval = { white, text };
+    const bottom = board.o.orientation;
+    const known = white != null;
+    evalBar.dataset.bottom = bottom === (you || "white") ? "you" : "opponent";
+    evalBar.classList.toggle("unknown", !known);
+    evalFill.style.height = `${known ? (bottom === "white" ? white : 100 - white) : 50}%`;
+    evalBar.setAttribute("aria-label", known ? `Evaluation: ${text}` : "Evaluation: engine off");
+    evalBar.title = known ? text : "Engine off";
+  }
+  const evalLabel = (white, cp = null, mate = null) =>
+    pro && (cp != null || mate != null) ? evalText(cp, mate) : `White's winning chances ${Math.round(white)}%`;
+  const fromEngine = (r) => {
+    const ln = r.lines && r.lines[0];
+    if (!ln) return null;
+    return ln.mate != null ? (ln.mate > 0 ? 100 : 0) : winPct(ln.cp);
+  };
+
+  function markCurrent() {
     items.forEach((b) => b && b.removeAttribute("aria-current"));
     const m = cur > 0 ? moves[cur - 1] : null;
-    if (m && items[m.ply]) { items[m.ply].setAttribute("aria-current", "true"); items[m.ply].scrollIntoView({ block: "nearest", inline: "nearest" }); }
+    if (!exploring && m && items[m.ply]) { items[m.ply].setAttribute("aria-current", "true"); items[m.ply].scrollIntoView({ block: "nearest", inline: "nearest" }); }
+    backBtn.style.visibility = exploring ? "visible" : "hidden";
+  }
+
+  function go(n, { showBest = true } = {}) {
+    exploring = false;
+    cur = Math.max(0, Math.min(moves.length, n));
+    const m = cur > 0 ? moves[cur - 1] : null;
     const bad = m && BAD.includes(m.class);
-    let shownFen;
-    if (bad && showBest) { // show the position before the mistake: what was played (blue) and what was best (red)
-      shownFen = m.fen;
+    if (bad && showBest) { // the position before the mistake: what was played (blue) and what was better (red)
+      shownPly = cur - 1;
       board.set({ fen: m.fen, lastMove: m.ply > 0 ? moves[m.ply - 1].uci : null, arrows: [uciArrow(m.uci, "you"), uciArrow(m.best, "coach")].filter(Boolean) });
     } else {
-      shownFen = m ? afterFen(m) : moves.length ? moves[0].fen : board.fen;
-      board.set({ fen: shownFen, lastMove: m ? m.uci : null, arrows: [] });
+      shownPly = cur;
+      board.set({ fen: gameFen(cur), lastMove: m ? m.uci : null, arrows: [] });
     }
+    markCurrent();
+    drawVariation();
     graph.mark(cur);
-    if (pro) showLines(shownFen);
-    if (!m) { fill(note, el("p", { class: "small muted", text: "Start position. Use the arrows, the graph or the move list." })); return; }
+    const white = rep.series ? rep.series[shownPly] : null;
+    setEval(white, evalLabel(white, shownPly > 0 ? moves[shownPly - 1].eval_white : null));
+    if (pro) showLines(board.fen);
+    if (!m) { fill(note, el("p", { class: "small muted", text: "Start position. Use the arrows, the graph or the move list, or play a move on the board." })); return; }
     const [sym, label, color] = CLASS[m.class];
     const head = el("p", {}, el("b", { class: "mono", text: `${num(m)}${m.san}${sym}` }), " ", el("span", { class: "cls", style: { background: color }, text: label }));
     if (pro) {
@@ -139,7 +238,7 @@ function draw(body, d, accountId, gameId, url, head) {
     const who = m.color === you ? "Your" : `${cap(m.color)}'s`;
     const chances = el("p", { class: "small" }, `${who} winning chances: `, el("b", { text: `${Math.round(m.win_before)}%` }), " → ",
       el("b", { text: `${Math.round(m.win_after)}%` }), m.loss >= 1 ? el("span", { class: "muted", text: ` (−${Math.round(m.loss)}%)` }) : "");
-    const bestLine = el("p", { class: "small" });
+    const bestLine = el("p", { class: "small best-line" });
     const tip = bad ? (m.tags || []).map((t) => TIPS[t]).find(Boolean) || "Compare your move with the red arrow: what does it do that yours doesn't?" : null;
     fill(note, head, chances,
       bad && m.best_san ? el("p", { class: "small" }, "Better was ", el("b", { text: m.best_san }), ". The red arrow shows it; the blue one, the move played.") : null,
@@ -148,20 +247,134 @@ function draw(body, d, accountId, gameId, url, head) {
       m.class === "great" ? el("p", { class: "small muted", text: "The only good move here, and it was found." }) : null,
       m.class === "brilliant" ? el("p", { class: "small muted", text: "A sound sacrifice: giving material for something better." }) : null,
       m.class === "book" ? el("p", { class: "small muted", text: "Known opening theory." }) : null);
-    if (bad) {
+    if (bad && engineOn) {
       const at = cur;
       engineLines(m.fen, 1).then((r) => {
-        if (at !== cur || !r.lines || !r.lines.length) return;
+        if (at !== cur || exploring || !r.lines || !r.lines.length) return;
         fill(bestLine, el("span", { class: "muted", text: "Best line: " }), el("span", { class: "mono", text: r.lines[0].text }));
       }).catch(() => {});
     }
   }
+
+  // ---- your own lines: play a move on the board (or Space for the engine's) to explore from any position ----
+  function played(info) {
+    if (!exploring && moves[shownPly] && moves[shownPly].uci === info.uci) { go(shownPly + 1, { showBest: false }); return; }
+    if (exploring && vari.idx < vari.moves.length && vari.moves[vari.idx].uci === info.uci) { vari.idx += 1; showVariation(); return; }
+    if (!exploring) vari = { rootPly: shownPly, rootFen: info.before, moves: [], idx: 0 };
+    vari.moves = vari.moves.slice(0, vari.idx);
+    vari.moves.push({ san: info.san, uci: info.uci, fen: info.fen });
+    vari.idx = vari.moves.length;
+    showVariation();
+  }
+  function showVariation({ animate = true } = {}) {
+    exploring = true;
+    const fen = vari.idx ? vari.moves[vari.idx - 1].fen : vari.rootFen;
+    const last = vari.idx ? vari.moves[vari.idx - 1].uci : null;
+    board.set({ fen, lastMove: last, arrows: [], marks: {}, animate });
+    markCurrent();
+    drawVariation();
+    const line = numberedFrom(vari.rootFen, vari.moves.slice(0, vari.idx).map((v) => v.san));
+    const evalP = el("p", { class: "small" });
+    fill(note, el("p", {}, el("b", { text: vari.rootPly == null ? "Your position" : "Your line" }), " ",
+      el("span", { class: "mono", text: line || "(start)" })),
+    el("p", { class: "small muted", text: vari.rootPly == null ? "Pasted, not from this game." : "Not played in the game. Esc or Back to game returns." }), evalP);
+    if (pro) showLines(fen);
+    if (!engineOn) { setEval(null, ""); fill(evalP, el("span", { class: "muted", text: "Engine off. Press E to turn it on." })); return; }
+    engineLines(fen, pro ? 3 : 1).then((r) => {
+      if (board.fen !== fen || !exploring) return;
+      if (r.over) { setEval(r.result === "1-0" ? 100 : r.result === "0-1" ? 0 : 50, `Game over: ${r.result}`); fill(evalP, `Game over: ${r.result}`); return; }
+      const white = fromEngine(r), ln = r.lines[0];
+      setEval(white, evalLabel(white, ln.cp, ln.mate));
+      if (!pro) fill(evalP, `White's winning chances: `, el("b", { text: `${Math.round(white)}%` }), ". Best here: ", el("span", { class: "mono", text: ln.text }));
+    }).catch((e) => fill(evalP, el("span", { class: "muted", text: e.status === 429 ? e.message : "The engine isn't available right now." })));
+  }
+  function backToGame() { if (exploring) go(cur); }
+  /** Your line in the move list, as a branch under the move it starts from. */
+  function drawVariation() {
+    if (!vari) { varLi.hidden = true; return; }
+    const at = vari.rootPly == null || vari.rootPly === 0 ? 0 : Math.floor((vari.rootPly - 1) / 2) + 1;
+    const anchor = rows[at] || null;
+    if (varLi.nextSibling !== anchor || varLi.parentNode !== list) list.insertBefore(varLi, anchor);
+    const [side, , , , , full] = vari.rootFen.split(" ");
+    let n = Number(full) || 1, white = side !== "b";
+    const btns = vari.moves.map((v, i) => {
+      const label = white ? `${n}.${v.san}` : i === 0 ? `${n}…${v.san}` : v.san;
+      if (!white) n += 1;
+      white = !white;
+      const b = el("button", { type: "button", class: "mv var-mv", text: label, onclick: () => { vari.idx = i + 1; showVariation(); } });
+      if (exploring && vari.idx === i + 1) b.setAttribute("aria-current", "true");
+      return b;
+    });
+    fill(varLi, el("span", { class: "var-label", text: vari.rootPly == null ? "Pasted" : "Your line" }), ...btns);
+    varLi.hidden = false;
+  }
+
+  // ---- keys and buttons ----
+  function step(d) {
+    if (!exploring) { go(cur + d); return; }
+    if (d < 0 && vari.idx === 0) { backToGame(); return; }
+    vari.idx = Math.max(0, Math.min(vari.moves.length, vari.idx + d));
+    showVariation();
+  }
+  function jump(end) {
+    if (exploring) { vari.idx = end ? vari.moves.length : 0; showVariation(); } else go(end ? moves.length : 0);
+  }
+  function flip() { board.flip(); setEval(lastEval.white, lastEval.text); }
+  function toggleEngine() {
+    engineOn = !engineOn;
+    store.set("pb:engine", engineOn);
+    engineBtn.setAttribute("aria-pressed", String(engineOn));
+    engineBtn.lastChild.textContent = engineOn ? "Engine on" : "Engine off";
+    if (exploring) showVariation({ animate: false }); else go(cur, { showBest: shownPly !== cur });
+  }
+  async function playBest() {
+    const fen = board.fen;
+    let uci = !exploring && moves[shownPly] ? moves[shownPly].best : null;
+    if (!uci) {
+      if (!engineOn) { toast("Turn the engine on (E) to play its best move."); return; }
+      try { uci = (await engineLines(fen, pro ? 3 : 1)).best; } catch (e) { toast(e.message); return; }
+      if (board.fen !== fen) return;
+    }
+    const r = uci ? applyMove(fen, uci) : null;
+    if (!r) return; // game over
+    board.set({ fen: r.fen, lastMove: r.uci, arrows: [], marks: {}, sound: true });
+    played({ ...r, before: fen });
+  }
+  pageKeys(body, "Analysis board", [
+    ["←", "Previous move"], ["→", "Next move"], ["↑", "Start"], ["↓", "End"], ["F", "Flip the board"], ["E", "Engine on or off"],
+    ["Space", "Play the engine's best move"], ["Esc", "Back to the game, from your own line"],
+  ], (e) => {
+    if (e.key === " " && e.target.closest && e.target.closest("button, a, summary")) return false; // Space still presses buttons
+    switch (e.key) {
+      case "ArrowLeft": step(-1); return true;
+      case "ArrowRight": step(1); return true;
+      case "ArrowUp": jump(false); return true;
+      case "ArrowDown": jump(true); return true;
+      case "f": case "F": flip(); return true;
+      case "e": case "E": toggleEngine(); return true;
+      case " ": playBest(); return true;
+      case "Escape": if (exploring) { backToGame(); return true; } return false;
+      default: return false;
+    }
+  });
+
+  const navBtn = (label, path, f) => el("button", { class: "btn quiet small icon-btn", type: "button", "aria-label": label, title: label, onclick: f },
+    svg("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round",
+      "stroke-linejoin": "round", "aria-hidden": "true" }, ...path.map((d) => svg("path", { d }))));
+  const nav = el("div", { class: "row report-nav" },
+    navBtn("Start (↑)", ["M6 5v14", "M18 6l-8 6 8 6z"], () => jump(false)), navBtn("Previous move (←)", ["M15 6l-6 6 6 6"], () => step(-1)),
+    navBtn("Next move (→)", ["M9 6l6 6-6 6"], () => step(1)), navBtn("End (↓)", ["M18 5v14", "M6 6l8 6-8 6z"], () => jump(true)));
+  const engineBtn = el("button", { class: "btn quiet small", type: "button", "aria-pressed": String(engineOn), title: "Engine on or off (E)",
+    onclick: toggleEngine }, el("span", { class: "engine-dot", "aria-hidden": "true" }), el("span", { text: engineOn ? "Engine on" : "Engine off" }));
+  const bestBtn = el("button", { class: "btn quiet small", type: "button", title: "Play the engine's best move (Space)", text: "Best move", onclick: playBest });
+  const backBtn = el("button", { class: "btn small back-btn", type: "button", text: "Back to game", onclick: backToGame, style: { visibility: "hidden" } });
 
   // ---- Pro: three engine lines for the position on the board ----
   const linesBox = el("section", { class: "engine-lines", "aria-label": "Engine lines", "aria-live": "polite" });
   let linesTimer = null;
   function showLines(fen) {
     clearTimeout(linesTimer);
+    if (!engineOn) { fill(linesBox, el("p", { class: "small muted", text: "Engine off. Press E to turn it on." })); return; }
     fill(linesBox, el("p", { class: "tiny faint", text: "Engine thinking…" }));
     linesTimer = setTimeout(async () => { // stepping quickly through moves asks the engine once, for where you stop
       try {
@@ -175,37 +388,46 @@ function draw(body, d, accountId, gameId, url, head) {
       } catch (e) { fill(linesBox, el("p", { class: "small muted", text: e.status === 429 ? e.message : "The engine isn't available right now." })); }
     }, 250);
   }
-  const fenAfter = new Map();
-  const afterFen = (m) => {
-    if (fenAfter.has(m.ply)) return fenAfter.get(m.ply);
-    const next = moves[m.ply + 1];
-    const f = next ? next.fen : null;
-    fenAfter.set(m.ply, f);
-    return f || finalFen;
-  };
-  const finalFen = rep.final_fen || null;
-  const navBtn = (t, l, f) => el("button", { class: "btn quiet small", type: "button", "aria-label": l, text: t, onclick: f });
-  const nav = el("div", { class: "row report-nav" }, navBtn("⏮", "Start", () => go(0)), navBtn("◀", "Back", () => go(cur - 1)),
-    navBtn("▶", "Forward", () => go(cur + 1)), navBtn("⏭", "End", () => go(moves.length)));
-  const keyNav = (e) => {
-    if (!body.isConnected) { document.removeEventListener("keydown", keyNav); return; }
-    if (e.target.closest("input, textarea, select")) return;
-    if (e.key === "ArrowLeft") { go(cur - 1); e.preventDefault(); }
-    if (e.key === "ArrowRight") { go(cur + 1); e.preventDefault(); }
-  };
-  document.addEventListener("keydown", keyNav);
 
   const graph = evalGraph(rep, (n) => go(n));
 
-  // ---- Pro: copy the position or the whole game ----
+  // ---- the position: copy, paste, open on Lichess ----
   const copy = async (text, what) => {
     try { await navigator.clipboard.writeText(text); toast(`${what} copied.`); } catch { toast(`Couldn't copy the ${what}. Your browser blocked it.`); }
   };
+  /** The game's annotated PGN, or, while you explore, the moves on the board: the game up to your line, then your line. */
+  async function currentPgn() {
+    if (!exploring) {
+      const r = await fetch(`${url}.pgn`, { credentials: "same-origin" });
+      if (!r.ok) throw new Error("Couldn't load the PGN.");
+      return r.text();
+    }
+    const g = vari.rootPly == null ? new Chess(vari.rootFen) : new Chess();
+    if (vari.rootPly != null) for (const m of moves.slice(0, vari.rootPly)) g.move(m.san);
+    for (const v of vari.moves.slice(0, vari.idx)) g.move(v.san);
+    g.setHeader("White", rep.white || "?");
+    g.setHeader("Black", rep.black || "?");
+    return g.pgn();
+  }
+  const copyPgn = async () => { try { copy(await currentPgn(), "PGN"); } catch (e) { toast(e.message); } };
+  const lichessUrl = () => `https://lichess.org/analysis/standard/${board.fen.replace(/ /g, "_")}`;
+  const menuItem = (text, onclick) => el("button", { type: "button", class: "menu-item", text, onclick: (e) => { e.currentTarget.closest("details").open = false; onclick(); } });
+  const posMenu = el("details", { class: "board-menu pos-menu" },
+    el("summary", { class: "btn quiet small", text: "Position" }),
+    el("div", { class: "board-menu-panel menu-list" },
+      menuItem("Copy FEN", () => copy(board.fen, "FEN")),
+      menuItem("Copy PGN", copyPgn),
+      menuItem("Paste a FEN or PGN…", () => openPaste((v) => { vari = { rootPly: null, idx: v.moves.length, ...v }; showVariation({ animate: false }); })),
+      el("a", { class: "menu-item", href: "#", target: "_blank", rel: "noopener", text: "Open on Lichess",
+        onclick: (e) => { e.currentTarget.href = lichessUrl(); e.currentTarget.closest("details").open = false; } })));
+  posMenu.addEventListener("toggle", () => {
+    const close = (e) => { if (!posMenu.contains(e.target) || (e.type === "keydown" && e.key === "Escape")) posMenu.open = false; };
+    if (posMenu.open) { document.addEventListener("pointerdown", close); document.addEventListener("keydown", close); posMenu._close = close; }
+    else if (posMenu._close) { document.removeEventListener("pointerdown", posMenu._close); document.removeEventListener("keydown", posMenu._close); }
+  });
   const copyRow = pro ? el("div", { class: "row copy-row" },
     el("button", { class: "btn quiet small", type: "button", text: "Copy FEN", onclick: () => copy(board.fen, "FEN") }),
-    el("button", { class: "btn quiet small", type: "button", text: "Copy PGN", onclick: async () => {
-      try { copy(await (await fetch(`${url}.pgn`, { credentials: "same-origin" })).text(), "PGN"); } catch { toast("Couldn't load the PGN."); }
-    } })) : null;
+    el("button", { class: "btn quiet small", type: "button", text: "Copy PGN", onclick: copyPgn })) : null;
 
   // ---- the grade cards ----
   const gradeCard = (c) => {
@@ -269,8 +491,9 @@ function draw(body, d, accountId, gameId, url, head) {
   fill(body, hero, el("section", { class: "sheet report-graph" }, el("div", { class: "spread" }, el("h3", { text: "Evaluation" }),
     el("span", { class: "tiny faint", text: "White's winning chances move by move. Click to jump." })), graph.node),
   el("div", { class: "report-main" },
-    el("div", { class: "report-left" }, boardHost, el("div", { class: "board-foot" }, nav, boardSettings(board)), copyRow, note,
-      pro ? linesBox : null, el("div", { class: "report-movebox" }, list)),
+    el("div", { class: "report-left" }, el("div", { class: "board-row" }, evalBar, boardHost),
+      el("div", { class: "board-foot" }, nav, backBtn), el("div", { class: "board-foot" }, engineBtn, bestBtn, posMenu, boardSettings(board)),
+      copyRow, note, pro ? linesBox : null, el("div", { class: "report-movebox" }, list)),
     el("div", { class: "report-right stack-lg" }, coach, km)),
   el("div", { class: "grid-2 even" }, phases, classes));
   const firstKey = rep.key_moments.find((k) => k.color === you) || rep.key_moments[0];
@@ -280,7 +503,7 @@ function draw(body, d, accountId, gameId, url, head) {
       { target: hero, title: "How the game was decided", text: "The verdict in one line, and both players' grades. A is 90% accuracy or better." },
       { target: graph.node, title: "Who was winning", text: "Your winning chances move by move. Dots mark the mistakes; click anywhere to jump there." },
       { target: boardHost, title: "Blue is you, red is the coach", text: "On a mistake, the blue arrow is the move played and the red arrow is the better one." },
-      { target: list, title: "Every move, marked", text: "Click any move, or use the ← and → keys. ?! is loose, ? costly, ?? drops the game." },
+      { target: list, title: "Every move, marked", text: "Click any move, or use ← and →. Play a move on the board to try your own line. Press ? for every shortcut." },
     ]);
   }
 }

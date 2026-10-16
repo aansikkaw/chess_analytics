@@ -26,7 +26,7 @@ export function render(main, sub) {
   if (key === "plan") plan(body);
   else if (key === "predicted") predicted.render(body);
   else if (key === "think") think.render(body);
-  else mine(body);
+  else mine(body, sub === "puzzle" ? Number(location.hash.split("/")[3]) || null : null);
 }
 
 // Homework a coach has set (for students who joined a coach's squad).
@@ -54,12 +54,19 @@ async function homeworkCard(host) {
 }
 
 // ---------------- your own mistakes ----------------
-async function mine(body) {
+/** Your due puzzles. `first` (from #/train/puzzle/<id>, e.g. the command palette) goes to the front, due or not. */
+async function mine(body, first = null) {
   const a = account();
   body.replaceChildren(el("p", { class: "muted", text: "Loading your puzzles…" }));
   let queue;
-  try { queue = await api(`/api/accounts/${a.id}/puzzles?due=true&limit=50`); }
-  catch (e) { body.replaceChildren(el("p", { class: "err", text: e.message })); return; }
+  try {
+    queue = await api(`/api/accounts/${a.id}/puzzles?due=true&limit=50`);
+    if (first) {
+      let pick = queue.find((q) => q.id === first);
+      if (!pick) pick = (await api(`/api/accounts/${a.id}/puzzles?due=false&limit=100`)).find((q) => q.id === first);
+      if (pick) queue = [pick, ...queue.filter((q) => q.id !== first)];
+    }
+  } catch (e) { body.replaceChildren(el("p", { class: "err", text: e.message })); return; }
   S.puzzles = queue;
   setDueCount(queue.length);
   if (!queue.length) { body.replaceChildren(emptyState({ tried: 0 })); return; }

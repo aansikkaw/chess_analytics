@@ -72,6 +72,12 @@ Two ways to read it, set under **Account → Analysis view** and remembered for 
 short tour the first time; **Pro** shows evaluations in pawns (+1.34, #5), engine depth, three engine lines with move
 numbers, coordinates, a compact layout and buttons to copy the FEN and PGN.
 
+The board is a full analysis board: an evaluation bar beside it, and any move you play (or **Space** for the engine's)
+starts your own line, shown as a branch in the move list with **Back to game** to return. Keys: ← → moves, ↑ ↓ start
+and end, **F** flip, **E** engine on/off, **?** every shortcut, and **Ctrl/⌘ K** anywhere for a command palette that
+jumps to a game, opening, report card or puzzle. The **Position** menu copies or pastes a FEN or PGN and opens the
+position on Lichess; the **Board** menu sets colours, piece set, coordinates and move sounds.
+
 * **Both players, every move.** Stockfish checks every position with its two best moves (depth
   `REVIEW_DEPTH`, default 14: about 10–20 seconds for a game).
 * **Move classes:**

@@ -2,7 +2,7 @@
 // Pages and code: network first, cached copy if offline. API calls are never cached.
 const VERSION = "pb-v1.2.2";
 const SHELL = ["/", "/static/app.css", "/static/js/main.js", "/static/js/core.js", "/static/js/board.js", "/static/js/dna.js",
-  "/static/js/landing.js", "/static/js/plans.js", "/static/js/shell.js", "/static/js/support.js", "/static/js/views/common.js",
+  "/static/js/landing.js", "/static/js/plans.js", "/static/js/shell.js", "/static/js/keys.js", "/static/js/palette.js", "/static/js/support.js", "/static/js/views/common.js",
   "/static/js/views/diagnose.js", "/static/js/views/train.js", "/static/js/views/prepare.js", "/static/js/views/coach.js",
   "/static/js/views/students.js", "/static/js/views/library.js", "/static/js/views/twin.js", "/static/js/views/puzzles.js",
   "/static/js/views/predict.js", "/static/js/views/think.js", "/static/js/views/scan.js", "/static/js/views/report.js",

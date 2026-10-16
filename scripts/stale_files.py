@@ -99,7 +99,9 @@ app/static/index.html
 app/static/js/board.js
 app/static/js/core.js
 app/static/js/dna.js
+app/static/js/keys.js
 app/static/js/landing.js
+app/static/js/palette.js
 app/static/js/main.js
 app/static/js/plans.js
 app/static/js/sheetcv.js

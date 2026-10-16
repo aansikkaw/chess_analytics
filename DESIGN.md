@@ -178,7 +178,7 @@ Never stack shadows, and never put a shadow on something inside a card.
 |---|---|---|
 | `--dur-press` | 80ms | Button press feedback |
 | `--dur-fast` | 140ms | Hover, focus, toggles, tab changes |
-| `--dur-move` | 180ms | A piece sliding one move, an arrow appearing |
+| `--dur-move` | 150ms | A piece sliding one move, an arrow appearing |
 | `--dur-panel` | 240ms | A panel opening, a variation expanding |
 | `--dur-reveal` | 600ms | The one orchestrated reveal on a page: Rating DNA bars growing in turn |
 
@@ -200,7 +200,9 @@ Easing: `--ease-out` for things arriving, `--ease-in-out` for things moving betw
 - **Pieces:** white pieces are white with an ink outline; black pieces are `--piece-black` with a thin `--board-light` outline, so they stay crisp on dark squares (2.8:1 without it in dark mode).
 - **Arrows:** blue = your move (`--arrow-you`), red = the coach's or engine's move (`--arrow-coach`), grey = drawn by the user (`--arrow-drawn`). With several engine lines, the best line's arrow is thickest and most opaque. Circles mark a square the coach wants you to look at, in red.
 - **Size:** 560px wide in a report, as large as fits (up to 720px) on the analysis board; full width on phones.
-- **User themes:** may exist, but none may reuse the colours listed in Principle 5.
+- **User themes:** Slate (the default, from the board tokens), Graphite, Walnut and Paper, in the Board menu. None may reuse the colours listed in Principle 5; saved choices of the old Green, Wood and Ice themes map to Slate or Walnut.
+- **Piece sets:** Chessnut (drawn, Apache-2.0) and Print (book-diagram glyphs from the Pieces font, OFL).
+- **Board menu** (every full-size board): colours, piece set, coordinates on/off and move sounds, saved in the browser and applied to every board on screen at once. Coordinates default to on in the Pro view and off in Guided until you choose.
 
 ### Move list
 
@@ -211,7 +213,7 @@ Easing: `--ease-out` for things arriving, `--ease-in-out` for things moving betw
   - Guided: may circle a `??` in red pen and adds short margin notes.
   - Pro: symbols only, moves in `--mono`, with the evaluation after each move.
 - **Variations:** indented under the move they branch from, in `--red` on a faint `--red-wash`, labelled "Engine line, depth N".
-- **Keyboard:** ← → step, Home / End jump, ↑ ↓ choose an engine line.
+- **Your own lines:** a move played on the board (or Space for the engine's) starts a branch, shown under the move it leaves from with "Your line"; "Back to game" (or Esc) returns, and the branch stays clickable. A pasted FEN or PGN appears as "Pasted".
 
 ### Evaluation bar
 
@@ -259,8 +261,24 @@ Easing: `--ease-out` for things arriving, `--ease-in-out` for things moving betw
 **Applied:**
 - The tokens and base styles in `app.css`: colours, fonts, type scale, spacing, radii, shadows, motion, focus, selection and the reduced-motion rule.
 - `--r` (cards) changed from 10px to 4px as part of this.
+- The board: Slate by default, our own themes, two piece sets, the Board menu, 150ms moves.
+- The report card's analysis board: the evaluation bar, your own lines, the shortcuts below, FEN/PGN copy and paste, Open on Lichess, icon buttons.
 
 **Not yet applied** (component rules above, to follow):
-- The default `.board` still uses the old green; the "Slate" board theme already uses the new board colours.
 - The report card still uses the old Brilliant/Great/Best labels and colours (`app/static/js/views/report.js`).
-- Move lists aren't in the mono face yet, and the eval bar isn't built.
+- Move lists outside the report card's Pro view aren't in the mono face yet.
+
+## Keyboard
+
+Shortcuts never fire while typing in a field, and an open dialog or menu keeps the keyboard to itself. `keys.js` owns them: a page adds its own with `pageKeys(node, title, list, handle)`, and `?` lists whatever works on the page you're on.
+
+| Keys | Where | What |
+|---|---|---|
+| ← → | analysis board | Previous / next move (inside your own line when exploring) |
+| ↑ ↓ | analysis board | Start / end |
+| F | analysis board | Flip the board (the eval bar flips with it) |
+| E | analysis board | Engine on or off (remembered) |
+| Space | analysis board | Play the engine's best move; on a focused button, Space still presses the button |
+| Esc | analysis board | Back to the game from your own line; otherwise closes a dialog or menu |
+| Ctrl K / ⌘ K | everywhere | Command palette: games, openings, report cards, puzzles and pages. Typing a kind ("puzzle", "opening") puts it first |
+| ? | everywhere | Every shortcut on this page |

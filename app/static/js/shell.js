@@ -11,6 +11,7 @@ import * as scan from "./views/scan.js";
 import * as report from "./views/report.js";
 import { renderPlans, bindCurrency } from "./plans.js";
 import { openSupport } from "./support.js";
+import "./keys.js"; // Ctrl/Cmd+K command palette, ? for every shortcut
 
 const AREAS = {
   diagnose: { title: "Diagnose", view: diagnose },

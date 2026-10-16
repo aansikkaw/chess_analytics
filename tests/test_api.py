@@ -64,6 +64,24 @@ def test_view_mode_defaults_to_guided_and_is_remembered(app_mod):
     assert other.get("/api/me").json()["view_mode"] == "guided"  # per user
 
 
+@needs_engine
+def test_search_index_for_the_command_palette(app_mod):
+    c = client(app_mod, "palette@test.com")
+    a = demo_account(c)
+    idx = c.get(f"/api/accounts/{a['id']}/search").json()
+    games = idx["games"]
+    assert games and {"game_id", "opponent", "result", "score", "played_at", "opening", "color", "reviewed"} <= set(games[0])
+    assert [g["played_at"] for g in games] == sorted((g["played_at"] for g in games), reverse=True)  # newest first
+    assert all(not g["reviewed"] for g in games) and idx["report_cards"] == []  # nothing reviewed yet
+    op = idx["openings"][0]
+    assert op["name"] and op["games"] >= 1 and any(g["game_id"] == op["latest_game_id"] for g in games)
+    assert [o["games"] for o in idx["openings"]] == sorted((o["games"] for o in idx["openings"]), reverse=True)
+    assert idx["puzzles"] and {"id", "played_san", "game_id", "opponent", "move_number", "due"} <= set(idx["puzzles"][0])
+    assert not {"solution", "solution_san", "line"} & set(idx["puzzles"][0])  # never ship the answer
+    other = client(app_mod, "palette2@test.com")
+    assert other.get(f"/api/accounts/{a['id']}/search").status_code == 404  # someone else's account
+
+
 def test_passwords_are_hashed(app_mod):
     client(app_mod, "hash@test.com")
     u = app_mod.store.user_by_email("hash@test.com")

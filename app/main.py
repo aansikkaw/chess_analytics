@@ -799,6 +799,31 @@ def profile(account_id: int, rating: int | None = None, user: dict = Depends(cur
     }
 
 
+@app.get("/api/accounts/{account_id}/search")
+def search_index(account_id: int, user: dict = Depends(current_user)) -> dict:
+    """Everything the command palette (Ctrl/Cmd+K) can jump to for one account: games, openings, report cards, puzzles.
+    Small enough to send whole; the browser filters as you type."""
+    acct = owned_account(account_id, user)
+    key = player_key(acct)
+    games = sorted(store.load_games(key), key=lambda g: g.played_at, reverse=True)
+    reviewed = review_mod.reviewed_ids(store, key)
+    rows = [{"game_id": g.game_id, "opponent": g.opponent, "result": g.result, "score": g.score, "played_at": g.played_at, "opening": g.opening,
+             "color": g.player_color, "time_class": g.time_class, "reviewed": g.game_id in reviewed} for g in games]
+    openings: dict[str, dict] = {}
+    for g in games:  # newest first, so the first game seen per opening is the latest
+        if g.opening:
+            o = openings.setdefault(g.opening, {"name": g.opening, "games": 0, "latest_game_id": g.game_id})
+            o["games"] += 1
+    by_id = {g.game_id: g for g in games}
+    now = time.time()
+    puzzles = [{"id": p["id"], "game_id": p["game_id"], "played_san": p["played_san"], "move_number": p["ply"] // 2 + 1,
+                "color": "white" if p["ply"] % 2 == 0 else "black", "themes": p["themes"],
+                "opponent": by_id[p["game_id"]].opponent if p["game_id"] in by_id else None, "due": p["due_at"] <= now}
+               for p in store.puzzles(key, due_only=False, limit=100)]
+    return {"games": rows, "report_cards": [r for r in rows if r["reviewed"]],
+            "openings": sorted(openings.values(), key=lambda o: -o["games"]), "puzzles": puzzles}
+
+
 @app.get("/api/accounts/{account_id}/game/{game_id}")
 def game_detail(account_id: int, game_id: str, user: dict = Depends(current_user)) -> dict:
     """One analysed game for the interactive board: every move, plus the engine's view of the player's mistakes."""
