@@ -57,6 +57,9 @@ class Settings:
     library_full_max: int = 10_000  # server-wide cap on games kept per library player (full-history downloads)
     previews_per_hour: int = 6  # per IP address
     signups_per_hour: int = 10  # per IP address
+    api_requests_per_minute: int = 300  # per IP address, across all /api/ routes; 0 turns it off
+    coach_per_minute: int = 6  # coach messages per user per minute (bursts; the plan's daily allowance still applies)
+    coach_global_per_minute: int = 30  # server-wide coach messages sent to the LLM per minute; extra ones get the built-in coach. 0 = no cap
     public_url: str = "http://localhost:8000"  # used in email links; detected automatically in Codespaces
     support_email: str | None = None
     brevo_api_key: str | None = None  # send through Brevo's HTTPS API (works where hosts block mail ports)
@@ -143,6 +146,9 @@ def load_settings() -> Settings:
         twin_depth=max(3, int(os.getenv("TWIN_DEPTH", "9"))),
         previews_per_hour=int(os.getenv("PREVIEWS_PER_HOUR", "6")),
         signups_per_hour=int(os.getenv("SIGNUPS_PER_HOUR", "10")),
+        api_requests_per_minute=max(0, int(os.getenv("API_REQUESTS_PER_MINUTE", "300"))),
+        coach_per_minute=max(1, int(os.getenv("COACH_PER_MINUTE", "6"))),
+        coach_global_per_minute=max(0, int(os.getenv("COACH_GLOBAL_PER_MINUTE", "30"))),
         public_url=_public_url(),
         support_email=(os.getenv("SUPPORT_EMAIL") or "").strip() or None,
         brevo_api_key=(os.getenv("BREVO_API_KEY") or "").strip() or None,

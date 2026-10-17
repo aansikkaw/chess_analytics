@@ -97,6 +97,9 @@ twin_review_limiter = auth.SharedLimiter(store, "twin_review", limit=40, window=
 scan_limiter = auth.SharedLimiter(store, "scan", limit=settings.scans_per_hour, window=3600)  # scoresheet photos per user
 decode_limiter = auth.SharedLimiter(store, "scan_decode", limit=600, window=3600)
 think_limiter = auth.SharedLimiter(store, "think_answer", limit=1500, window=3600)
+coach_limiter = auth.SharedLimiter(store, "coach_burst", limit=settings.coach_per_minute, window=60)  # per user
+coach_llm_limiter = auth.SharedLimiter(store, "coach_llm", limit=settings.coach_global_per_minute, window=60)  # whole server
+api_throttle = auth.RequestThrottle(settings.api_requests_per_minute, window=60)  # per IP, every /api/ request
 
 
 def audit(user: dict | None, action: str, target: str | None = None, **detail) -> None:
@@ -194,6 +197,18 @@ async def same_origin_writes(request: Request, call_next):
         origin = request.headers.get("origin")
         if request.headers.get("sec-fetch-site") == "cross-site" or (origin and origin != "null" and not _same_origin(origin, request)):
             return JSONResponse({"detail": "Requests from other websites aren't allowed."}, status_code=403)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def throttle_api(request: Request, call_next):
+    """A ceiling on API requests per IP, so one client (a script, a stuck tab) can't starve everyone else.
+    Feature limits (sign-ins, coach, previews...) are tighter and still apply on top."""
+    if request.url.path.startswith("/api/") and request.url.path != "/api/health":
+        wait = api_throttle.hit(client_ip(request))
+        if wait is not None:
+            return JSONResponse({"detail": "Too many requests. Slow down and try again in a minute."}, status_code=429,
+                                headers={"Retry-After": str(int(wait + 0.999))})
     return await call_next(request)
 
 
@@ -1057,6 +1072,9 @@ def attempt(puzzle_id: int, req: AttemptRequest, user: dict = Depends(current_us
 def coach(account_id: int, req: ChatRequest, user: dict = Depends(verified_user)) -> dict:
     acct = owned_account(account_id, user)
     games = games_or_404(acct)
+    if coach_limiter.blocked(str(user["id"])):
+        raise HTTPException(429, "You're sending messages faster than the coach can answer. Wait a moment and ask again.")
+    coach_limiter.fail(str(user["id"]))
     spend(user, "coach", plan_of(user)["coach_messages_per_day"])
     tools = CoachTools(games, bundle_or_404(acct), state["engine"], store.count_due(player_key(acct)), pro=is_pro(user))
     backends = resolve_backends(settings)
@@ -1066,6 +1084,12 @@ def coach(account_id: int, req: ChatRequest, user: dict = Depends(verified_user)
     budget = plan_of(user).get("ai_tokens_per_day", 0)
     if backends and budget and store.usage_today(user["id"], "ai_tokens") >= budget:
         backends, notice = [], "You've used today's AI coach allowance, so the built-in coach is answering. It resets at midnight UTC."
+    if backends and settings.coach_global_per_minute:
+        # Everyone shares the provider's per-minute limits: past this cap, answer offline rather than queue up 429s.
+        if coach_llm_limiter.blocked("all"):
+            backends, notice = [], "The AI coach is busy right now, so the built-in coach is answering. Try again in a minute."
+        else:
+            coach_llm_limiter.fail("all")
     r = Coach(acct["handle"], tools, backends).chat(req.message, req.history)  # never raises: falls back to offline
     if r.tokens:
         store.bump_usage(user["id"], "ai_tokens", r.tokens)

@@ -94,6 +94,29 @@ class LoginLimiter:
             self._hits.pop(ip, None)
 
 
+class RequestThrottle:
+    """At most `limit` requests per key per fixed `window`, counted in memory: cheap enough to run on every API request.
+    Each web process keeps its own count (the proxy spreads clients over processes), so the effective limit is per process."""
+
+    def __init__(self, limit: int, window: float = 60):
+        self.limit, self.window = limit, window
+        self._slot = -1
+        self._counts: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def hit(self, key: str) -> float | None:
+        """Count one request. Returns None if allowed, or the seconds until the window resets if over the limit."""
+        if self.limit <= 0:
+            return None
+        now = time.time()
+        slot = int(now // self.window)
+        with self._lock:
+            if slot != self._slot:  # a new window: forget the last one, so memory never grows past one window's clients
+                self._slot, self._counts = slot, {}
+            n = self._counts[key] = self._counts.get(key, 0) + 1
+        return None if n <= self.limit else max(1.0, (slot + 1) * self.window - now)
+
+
 class SharedLimiter(LoginLimiter):
     """The same limits, counted in the database, so every web process (and restarts) share one count.
     Without this, running two web processes would quietly double every limit."""

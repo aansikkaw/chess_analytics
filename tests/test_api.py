@@ -383,3 +383,52 @@ def test_migration_from_older_database(tmp_path):
     p = st.puzzles("u")[0]
     assert p["accept"] == [] and p["kind"] == "mistake"
     assert st.repertoires(1) == []
+
+
+# ---- rate limits ------------------------------------------------------------------------
+def test_api_requests_are_throttled_per_ip(app_mod, monkeypatch):
+    from app.auth import RequestThrottle
+
+    monkeypatch.setattr(app_mod, "api_throttle", RequestThrottle(3, window=60))
+    c = TestClient(app_mod.app)
+    assert [c.get("/api/me").status_code for _ in range(3)] == [401] * 3
+    r = c.get("/api/me")
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1 and r.headers["x-request-id"]
+    assert c.get("/api/health").status_code == 200  # health checks are never throttled
+    assert c.get("/").status_code == 200  # nor pages and static files
+
+
+def test_request_throttle_forgets_old_windows(monkeypatch):
+    from app import auth
+
+    clock = [1000.0]
+    monkeypatch.setattr(auth.time, "time", lambda: clock[0])
+    t = auth.RequestThrottle(2, window=60)
+    assert [t.hit("a"), t.hit("a"), t.hit("b")] == [None, None, None]
+    assert t.hit("a") == 20.0  # 1000 is 40s into its minute
+    clock[0] += 20
+    assert t.hit("a") is None and auth.RequestThrottle(0).hit("a") is None  # a new window; 0 = off
+
+
+def test_coach_messages_are_throttled_per_user(app_mod, monkeypatch):
+    c = client(app_mod, "coachburst@test.com")
+    acct = demo_account(c)
+    monkeypatch.setattr(app_mod.coach_limiter, "limit", 2)
+    codes = [c.post(f"/api/accounts/{acct['id']}/coach", json={"message": "study plan?"}).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+    other = client(app_mod, "coachburst2@test.com")  # a different user isn't affected
+    assert other.post(f"/api/accounts/{demo_account(other)['id']}/coach", json={"message": "hi"}).status_code == 200
+
+
+def test_busy_ai_coach_hands_over_to_the_built_in_coach(app_mod, monkeypatch):
+    from app.llm import Backend
+
+    c = client(app_mod, "coachbusy@test.com")
+    acct = demo_account(c)
+    monkeypatch.setattr(app_mod, "resolve_backends", lambda s: [Backend("openai", "m", "http://unreachable.invalid/v1", "k")])
+    monkeypatch.setattr(app_mod.coach_llm_limiter, "limit", 1)
+    app_mod.coach_llm_limiter.reset("all")
+    app_mod.coach_llm_limiter.fail("all")  # the server's share for this minute is used up
+    r = c.post(f"/api/accounts/{acct['id']}/coach", json={"message": "study plan?"}).json()
+    assert r["mode"] == "offline" and "busy" in r["notice"] and r["reply"]
+    app_mod.coach_llm_limiter.reset("all")

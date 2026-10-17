@@ -491,10 +491,13 @@ Limits live in `app/plans.py`. Payments aren't wired up: users press **Request P
 | `COACH_PROVIDER` | `auto` | `auto`, `anthropic`, `openai`, `ollama`, `offline` |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | unset | OpenAI-compatible provider |
 | `LLM_REASONING_EFFORT` | `low` for gpt-oss models | How long the model thinks; `low` saves free-tier tokens |
+| `COACH_PER_MINUTE` | `6` | Coach messages per user per minute (bursts; the plan's daily allowance still applies) |
+| `COACH_GLOBAL_PER_MINUTE` | `30` | Server-wide coach messages sent to the LLM per minute; extra ones get the built-in coach. Match your provider's limits (`0` = no cap) |
 | `ANTHROPIC_API_KEY` / `COACH_MODEL` | unset / `claude-sonnet-5-5` | Claude |
 | `JOB_MODE` | `thread` | `thread`: workers inside the web process. `external`: run `python -m app.worker` separately (production) |
 | `IMPORT_CHUNK` | `20` | Games analysed per turn before a long import yields the queue |
 | `PREVIEW_GAMES` / `PREVIEW_DEPTH` / `PREVIEWS_PER_HOUR` | `15` / `8` / `6` | Landing-page preview size, depth, per-IP limit |
+| `API_REQUESTS_PER_MINUTE` | `300` | API requests per IP per minute, per web process (`429` with `Retry-After` past it; `0` = off) |
 | `PUBLIC_URL` | `http://localhost:8000` | Base URL used in email links |
 | `SUPPORT_EMAIL` | unset | Shown in the app; support messages are emailed here |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_SECURITY` | unset / `587` / … / `starttls` | Outgoing email; without it, emails go to `outbox/` |
