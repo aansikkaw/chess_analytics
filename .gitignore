@@ -12,3 +12,6 @@ outbox/
 bundles/
 *.db
 *.db-*
+
+# Playwright MCP screenshots and logs from UI checks
+.playwright-mcp/

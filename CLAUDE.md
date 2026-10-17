@@ -19,7 +19,11 @@ for f in app/static/js/*.js app/static/js/views/*.js app/static/sw.js; do node -
 python scripts/admin.py ...                  # users, grant/revoke plans, kill switches, audit log
 python -m app.worker                         # separate job worker (with JOB_MODE=external)
 python -m app.scheduler [--once]             # backups, restore test, weekly digest
+python scripts/make_sample_report.py         # rebuild app/static/sample-report.json (landing-page sample) after changing the report format
+python scripts/stale_files.py                # list root files not in the current release
 ```
+
+The `*.patch`, `*_patch.txt` and `*.zip` files in the repo root are leftovers from older releases. They are not the source of truth, so ignore them.
 
 CI (`.github/workflows/ci.yml`) runs ruff, `node --check`, pytest with real Stockfish, `pip-audit` on `requirements.lock`, and a Docker build + `/api/health` smoke test.
 
@@ -39,7 +43,8 @@ CI (`.github/workflows/ci.yml`) runs ruff, `node --check`, pytest with real Stoc
 - New static JS/CSS files must be added to the `SHELL` list in `app/static/sw.js`; bump its `VERSION` on release so clients drop stale caches.
 - New tracked files must be added to the `RELEASE` set in `scripts/stale_files.py` (it lists files not in the current release).
 - New env vars: add to `app/config.py`, the README settings table, and `deploy/.env.example`; set a fast/safe value in `tests/conftest.py` if it controls engine depth or external calls.
-- Tests never touch real LLMs, vision models, SMTP or network — conftest strips those env vars and uses `COACH_PROVIDER=offline` and tiny engine depths. Shared fixtures `engine`, `demo_games`, `demo_bundle` use `sample_data/demo_games.pgn`.
+- Tests never touch real LLMs, vision models, SMTP or network — conftest strips those env vars and uses `COACH_PROVIDER=offline` and tiny engine depths. Shared fixtures `engine`, `demo_games`, `demo_bundle` use `sample_data/demo_games.pgn` (synthetic games for `demo_player`); mark Stockfish-dependent tests with `needs_engine` from `tests/conftest.py`.
+- UI changes are checked in a headless browser at desktop (1200px) and phone (390px) widths, looking for no JS errors and no sideways scroll; `.mcp.json` configures a Playwright server for this.
 - Production deps are pinned with hashes in `requirements.lock`; regenerate after editing `requirements*.txt` (command at the top of that file).
 
 ## Rules
