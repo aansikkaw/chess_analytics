@@ -14,6 +14,16 @@
 <link rel="preload" href="/static/fonts/archivo-latin-standard-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/static/fonts/chess-pieces.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/app.css">
+<!-- The first screen's modules, fetched together instead of one import after another (keep in step with main.js and landing.js) -->
+<link rel="modulepreload" href="/static/js/main.js">
+<link rel="modulepreload" href="/static/js/core.js">
+<link rel="modulepreload" href="/static/js/landing.js">
+<link rel="modulepreload" href="/static/js/board.js">
+<link rel="modulepreload" href="/static/vendor/chess.js">
+<link rel="modulepreload" href="/static/js/dna.js">
+<link rel="modulepreload" href="/static/js/plans.js">
+<link rel="modulepreload" href="/static/js/report-graph.js">
+<link rel="modulepreload" href="/static/js/support.js">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -106,7 +116,7 @@
 <!-- ====================== Signed in: the app ====================== -->
 <div id="app" class="app" hidden>
   <header class="topbar">
-    <a class="brand" href="#/diagnose"><span class="rook" aria-hidden="true">♜&#xFE0E;</span><span class="word">Plateau Breaker</span></a>
+    <a class="brand" href="#/diagnose" aria-label="Plateau Breaker: your dashboard"><span class="rook" aria-hidden="true">♜&#xFE0E;</span><span class="word">Plateau Breaker</span></a>
     <button class="acct-switch" id="acctSwitch" type="button" aria-haspopup="dialog"><span class="who" id="acctWho">Link an account</span><span class="plat" id="acctPlat"></span><span class="caret" aria-hidden="true">▼</span></button>
     <span class="sync-state" id="syncState" aria-live="polite"></span>
     <span class="grow"></span>

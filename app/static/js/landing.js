@@ -6,15 +6,11 @@ import { $, S, api, el, fill, openDialog, post, showErr, sleep, toast, track } f
 import { Board, miniBoard, uciArrow, uciMarks } from "./board.js";
 import { renderDNA } from "./dna.js";
 import { bindCurrency, renderPlans } from "./plans.js";
-import { BAD, CLASS, evalGraph, numberedFrom } from "./views/report.js";
+import { BAD, CLASS, evalGraph } from "./report-graph.js";
 
 let onSignedIn = null;
 export function initLanding(signedInCallback) {
   onSignedIn = signedInCallback;
-  renderSample($("#sampleCard"));
-  const rerender = () => renderPlans($("#lpPlans"), { onChoose: () => openAuth("signup"), quiet: true });
-  bindCurrency(rerender);
-  rerender();
   bindPlatform();
   $("#previewForm").addEventListener("submit", (e) => { e.preventDefault(); runPreview(); });
   document.querySelectorAll("[data-auth]").forEach((b) => b.addEventListener("click", () => openAuth(b.dataset.auth)));
@@ -72,9 +68,17 @@ async function renderSample(host) {
   show(worst ? worst.ply + 1 : 0);
 }
 
+let sampleDrawn = false;
 export function showLanding() {
   $("#app").hidden = true;
   $("#landing").hidden = false;
+  if (!sampleDrawn) { // the sample and the plan table only for visitors who see the landing page
+    sampleDrawn = true;
+    renderSample($("#sampleCard"));
+    const rerender = () => renderPlans($("#lpPlans"), { onChoose: () => openAuth("signup"), quiet: true });
+    bindCurrency(rerender);
+    rerender();
+  }
   document.title = "Plateau Breaker: see what is holding your rating back";
 }
 

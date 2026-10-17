@@ -5,24 +5,16 @@
 // pawns, engine depth, three engine lines, coordinates, FEN/PGN copy. Same page, same data (DESIGN.md).
 
 import { api, el, evalText, fill, post, proView, store, svg, toast, track, winPct } from "../core.js";
-import { Board, applyMove, boardSettings, coordsPref, miniBoard, uciArrow } from "../board.js";
+import { Board, applyMove, boardSettings, coordsPref, fitMenu, miniBoard, uciArrow } from "../board.js";
 import { pageKeys } from "../keys.js";
+import { BAD, CLASS, evalGraph, numberedFrom } from "../report-graph.js";
 import { Chess, validateFen } from "../../vendor/chess.js";
 import { followJob } from "./common.js";
 
-// Move classes: the standard symbols with our own words (DESIGN.md: never another site's move tiers or colours).
-// Tone: "err" is the coach's red pen, "good" is ink, "plain" carries no mark.
-export const CLASS = {
-  brilliant: ["!!", "Sound sacrifice", "good"], great: ["!", "Only good move", "good"], best: ["", "Engine's choice", "plain"],
-  excellent: ["", "Good", "plain"], good: ["", "Good", "plain"], book: ["", "Book move", "plain"], forced: ["□", "Only move", "plain"],
-  inaccuracy: ["?!", "Inaccuracy", "err"], mistake: ["?", "Mistake", "err"], miss: ["?", "Didn't punish", "err"],
-  blunder: ["??", "Blunder", "err"],
-};
 const FEATURE_LINK = { predicted: "#/train/predicted", think: "#/train/think", mistakes: "#/train", plan: "#/train/plan", coach: "#/coach",
   prepare: "#/prepare" };
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
 const num = (m) => `${m.move_number}${m.color === "white" ? "." : "..."}`;
-export const BAD = ["inaccuracy", "mistake", "miss", "blunder"];
 /** Guided view: one habit to take away, from what went wrong on the move. */
 const TIPS = {
   allowed_mate: "Before going after material, check that your king is safe.",
@@ -35,18 +27,6 @@ const TIPS = {
 };
 const TOUR_KEY = "pb:tour:report:v1";
 const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-
-/** "12.Nxe6 Qc8 13.Nxf8", or "12…Nxg6 13.Qh5" when Black moves first, numbered from `fen`. */
-export function numberedFrom(fen, sans) {
-  const [side, , , , , full] = fen.split(" ");
-  let n = Number(full) || 1, white = side !== "b";
-  return sans.map((san, i) => {
-    const t = white ? `${n}.${san}` : i === 0 ? `${n}…${san}` : san;
-    if (!white) n += 1;
-    white = !white;
-    return t;
-  }).join(" ");
-}
 
 /** A FEN, or a PGN (its moves, from its own start position), from pasted text; null if it's neither. */
 function parsePasted(text) {
@@ -125,6 +105,18 @@ async function load(body, accountId, gameId, head) {
     return;
   }
   draw(body, d, accountId, gameId, url, head);
+}
+
+/** A mini-board drawn when it scrolls near the screen (the key moments sit far below the first screen on a phone).
+ *  The placeholder keeps the board's size, so nothing moves when it appears. */
+const nearScreen = "IntersectionObserver" in window ? new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) { nearScreen.unobserve(e.target); e.target._draw(); }
+}, { rootMargin: "300px 0px" }) : null;
+function lazyMini(fen, opts) {
+  const slot = el("div", { class: "mini mini-slot", role: "img", "aria-label": opts.label });
+  slot._draw = () => slot.replaceWith(miniBoard(fen, opts));
+  if (nearScreen) nearScreen.observe(slot); else queueMicrotask(slot._draw);
+  return slot;
 }
 
 /** While a report card is being made: the three steps, with the current one marked. */
@@ -206,10 +198,20 @@ function draw(body, d, accountId, gameId, url, head) {
     return ln.mate != null ? (ln.mate > 0 ? 100 : 0) : winPct(ln.cp);
   };
 
+  /** Scroll the move list's own box (never the page) so the current move shows, after the next layout rather than
+   *  forcing one: on first render that layout is the whole page's. */
+  function keepInMoveBox(btn) {
+    requestAnimationFrame(() => {
+      const box = btn.closest(".report-movebox");
+      if (!box) return;
+      const top = btn.offsetTop, bottom = top + btn.offsetHeight;
+      if (top < box.scrollTop || bottom > box.scrollTop + box.clientHeight) box.scrollTop = Math.max(0, top - box.clientHeight / 2);
+    });
+  }
   function markCurrent() {
     items.forEach((b) => b && b.removeAttribute("aria-current"));
     const m = cur > 0 ? moves[cur - 1] : null;
-    if (!exploring && m && items[m.ply]) { items[m.ply].setAttribute("aria-current", "true"); items[m.ply].scrollIntoView({ block: "nearest", inline: "nearest" }); }
+    if (!exploring && m && items[m.ply]) { items[m.ply].setAttribute("aria-current", "true"); keepInMoveBox(items[m.ply]); }
     backBtn.style.visibility = exploring ? "visible" : "hidden";
   }
 
@@ -430,6 +432,7 @@ function draw(body, d, accountId, gameId, url, head) {
       el("a", { class: "menu-item", href: "#", target: "_blank", rel: "noopener", text: "Open on Lichess",
         onclick: (e) => { e.currentTarget.href = lichessUrl(); e.currentTarget.closest("details").open = false; } })));
   posMenu.addEventListener("toggle", () => {
+    fitMenu(posMenu);
     const close = (e) => { if (!posMenu.contains(e.target) || (e.type === "keydown" && e.key === "Escape")) posMenu.open = false; };
     if (posMenu.open) { document.addEventListener("pointerdown", close); document.addEventListener("keydown", close); posMenu._close = close; }
     else if (posMenu._close) { document.removeEventListener("pointerdown", posMenu._close); document.removeEventListener("keydown", posMenu._close); }
@@ -485,7 +488,7 @@ function draw(body, d, accountId, gameId, url, head) {
     const after = moves[k.ply] ? moves[k.ply].eval_white : null;
     return el("li", {}, el("button", { type: "button", class: `km-card${k.color === you ? " mine" : ""}`, onclick: () => jumpTo(k.ply),
       "aria-label": `${k.label}${sym}, ${label}, ${who}. Jump to this move.` },
-    miniBoard(k.fen, { orientation: you || "white", arrows: [uciArrow(k.uci, "you"), uciArrow(k.best, "coach")].filter(Boolean),
+    lazyMini(k.fen, { orientation: you || "white", arrows: [uciArrow(k.uci, "you"), uciArrow(k.best, "coach")].filter(Boolean),
       label: `${k.label}: played ${k.san}, better ${k.best_san || "–"}` }),
     el("span", { class: "km-body" },
       el("span", { class: "km-head" }, el("b", { class: "mono", text: k.label }), el("b", { class: `mono sym ${tone}`, text: sym }),
@@ -609,70 +612,4 @@ function coachCard(d, url, reload, jump) {
     el("p", { class: "tiny faint", text: `${src}. Every move it mentions was checked against the engine's analysis${ai.removed && ai.removed.length ? "; sentences it couldn't check were removed" : ""}.` }),
     askBtn ? el("div", { class: "row" }, askBtn, el("span", { class: "tiny faint", text: `${d.ai_left} AI write-up${d.ai_left === 1 ? "" : "s"} left today` })) : null,
     out);
-}
-
-/** The evaluation graph, as a slider you can scrub: drag along it (or use the arrow keys) and the board follows.
- *  Guided: your winning chances, labelled in words. Pro: White's side, with ±1 and ±3 pawns marked. */
-export function evalGraph(rep, { you, pro, onPick }) {
-  const s = rep.series;
-  const n = Math.max(1, s.length - 1);
-  const persp = pro ? "white" : you || "white";
-  const val = (i) => (persp === "white" ? s[i] : 100 - s[i]);
-  const W = 800, H = 160;
-  const x = (i) => (i / n) * W, y = (v) => H - (v / 100) * H;
-  const pts = s.map((_, i) => `${x(i).toFixed(1)},${y(val(i)).toFixed(1)}`).join(" ");
-  const uid = Math.random().toString(36).slice(2, 7);
-  const area = (clip, cls) => svg("polygon", { points: `0,${H / 2} ${pts} ${W},${H / 2}`, class: cls, "clip-path": `url(#${clip}-${uid})` });
-  const guides = pro ? [75.1, 59.1, 40.9, 24.9] : [];
-  const plot = svg("svg", { class: "eg-svg", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" },
-    svg("defs", {}, svg("clipPath", { id: `up-${uid}` }, svg("rect", { x: 0, y: 0, width: W, height: H / 2 })),
-      svg("clipPath", { id: `dn-${uid}` }, svg("rect", { x: 0, y: H / 2, width: W, height: H / 2 }))),
-    ...guides.map((g) => svg("line", { x1: 0, x2: W, y1: y(g), y2: y(g), class: "eg-guide" })),
-    area("up", "eg-up"), area("dn", "eg-dn"),
-    svg("line", { x1: 0, x2: W, y1: H / 2, y2: H / 2, class: "eg-mid" }),
-    svg("polyline", { points: pts, class: "eg-line" }));
-  const pct = (i) => `${(i / n) * 100}%`;
-  const labels = pro
-    ? [["+3", 75.1], ["+1", 59.1], ["−1", 40.9], ["−3", 24.9]]
-    : [[you ? "You're winning" : `${cap(persp)} winning`, 92], ["Even", 50], [you ? "They're winning" : `${persp === "white" ? "Black" : "White"} winning`, 8]];
-  const dots = rep.moves.filter((m) => BAD.includes(m.class)).map((m) => el("span", {
-    class: `eg-dot ${m.color === (you || "white") ? "mine" : "theirs"} ${m.class}`, "aria-hidden": "true",
-    style: { left: pct(m.ply + 1), top: `${100 - val(m.ply + 1)}%` } }));
-  const cursor = el("span", { class: "eg-cursor", "aria-hidden": "true" });
-  const tip = el("span", { class: "eg-tip", "aria-hidden": "true" });
-  const node = el("div", { class: "eg-wrap", role: "slider", tabindex: "0", "aria-label": pro ? "Evaluation graph" : "Who was winning, move by move",
-    "aria-valuemin": "0", "aria-valuemax": String(n), "aria-valuenow": "0" },
-  plot, ...labels.map(([t, v]) => el("span", { class: "eg-label", style: { top: `${100 - v}%` }, text: t })), ...dots, cursor, tip);
-  const describe = (i) => {
-    const m = i > 0 ? rep.moves[i - 1] : null;
-    const where = m ? `${num(m)}${m.san}${CLASS[m.class][0]}` : "Start";
-    const v = val(i);
-    return pro ? `${where} · ${evalText(m ? m.eval_white : null, null, 2).replace("–", `${Math.round(s[i])}%`)}`
-      : `${where} · ${you ? "you" : persp} ${Math.round(v)}%`;
-  };
-  let pressed = false, raf = 0, last = -1;
-  const at = (e) => { const r = node.getBoundingClientRect(); return Math.max(0, Math.min(n, Math.round(((e.clientX - r.left) / r.width) * n))); };
-  const pick = (e) => {
-    const i = at(e);
-    if (i === last) return;
-    last = i;
-    cancelAnimationFrame(raf);
-    raf = requestAnimationFrame(() => onPick(i));
-  };
-  node.addEventListener("pointerdown", (e) => { if (e.button !== 0) return; pressed = true; last = -1; node.setPointerCapture(e.pointerId); node.classList.add("scrubbing"); pick(e); });
-  node.addEventListener("pointermove", (e) => { if (pressed) pick(e); });
-  const release = () => { pressed = false; node.classList.remove("scrubbing"); };
-  node.addEventListener("pointerup", release);
-  node.addEventListener("pointercancel", release);
-  node.addEventListener("keydown", (e) => {
-    if (e.key === "Home") { onPick(0); e.preventDefault(); e.stopPropagation(); }
-    if (e.key === "End") { onPick(n); e.preventDefault(); e.stopPropagation(); }
-  });
-  return { node, mark: (i) => {
-    cursor.style.left = pct(i);
-    tip.textContent = describe(i);
-    tip.style.left = `${Math.min(88, Math.max(12, (i / n) * 100))}%`;
-    node.setAttribute("aria-valuenow", String(i));
-    node.setAttribute("aria-valuetext", describe(i));
-  } };
 }

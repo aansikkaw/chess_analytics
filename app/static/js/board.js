@@ -173,6 +173,10 @@ export class Board {
     this.updateLabel();
     this.syncPieces(false);
     this.renderStatic();
+    // Until the board has been on screen there's nothing to see sliding, and starting a slide would force the page's
+    // first layout early (a long task on a big page). So moves before the first paint just appear.
+    this.painted = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => { this.painted = true; }));
     if (this.o.interactive || this.o.draw) this.bindPointer();
   }
 
@@ -192,7 +196,7 @@ export class Board {
       this.drawn = [];
       if (sound) playSound(sound === true ? this.inferSound(prev, o.fen) : sound);
     }
-    if (fenChanged || "orientation" in o) this.syncPieces(fenChanged && animate && !("orientation" in o));
+    if (fenChanged || "orientation" in o) this.syncPieces(fenChanged && animate && this.painted && !("orientation" in o));
     if ("locked" in o && o.locked) this.sel = null;
     this.updateLabel();
     this.renderStatic();
@@ -242,19 +246,21 @@ export class Board {
     this.pieceEls = new Map();
     this.syncPieces(false);
   }
-  place(el, sq, fromSq = null) {
-    const to = this.cr(sq);
-    const target = `translate(${to.c * 100}%, ${to.r * 100}%)`;
-    if (fromSq && !reduceMotion()) {
-      const f = this.cr(fromSq);
-      el.classList.remove("anim");
-      el.style.transform = `translate(${f.c * 100}%, ${f.r * 100}%)`;
-      void el.offsetWidth; // start the transition from the old square
+  at(sq) { const { c, r } = this.cr(sq); return `translate(${c * 100}%, ${r * 100}%)`; }
+  place(el, sq) {
+    el.style.transform = this.at(sq);
+    el.dataset.sq = sq;
+  }
+  /** Slide pieces [[el, from, to], …] together: every start position, then one layout, then every target. One forced
+   *  layout per move instead of one per piece (a jump of many plies on a long page used to cost hundreds of ms). */
+  slide(moves) {
+    for (const [el, from] of moves) { el.classList.remove("anim"); el.style.transform = this.at(from); }
+    void this.host.offsetWidth; // start the transitions from the old squares
+    for (const [el, , to] of moves) {
       el.classList.add("anim");
       el.addEventListener("transitionend", () => el.classList.remove("anim"), { once: true });
+      this.place(el, to);
     }
-    el.style.transform = target;
-    el.dataset.sq = sq;
   }
   syncPieces(animate) {
     const next = parseFen(this.o.fen);
@@ -263,7 +269,7 @@ export class Board {
       if (next[sq] === rec.p) kept.set(sq, rec);
       else vanished.push([sq, rec]);
     }
-    const moved = new Set();
+    const moved = new Set(), slides = [];
     const dist = (a, b) => Math.abs(FILES.indexOf(a[0]) - FILES.indexOf(b[0])) + Math.abs(a[1] - b[1]);
     for (const [sq, p] of Object.entries(next)) {
       if (kept.has(sq)) continue;
@@ -272,7 +278,7 @@ export class Board {
       if (best >= 0) {
         const [[fromSq, rec]] = vanished.splice(best, 1);
         kept.set(sq, rec);
-        this.place(rec.el, sq, animate ? fromSq : null);
+        if (animate && !reduceMotion()) slides.push([rec.el, fromSq, sq]); else this.place(rec.el, sq);
         moved.add(rec);
       } else {
         const el = this.makePiece(p);
@@ -287,6 +293,7 @@ export class Board {
       else rec.el.remove();
     }
     for (const [sq, rec] of kept) if (!moved.has(rec)) this.place(rec.el, sq);
+    if (slides.length) this.slide(slides);
     this.pieceEls = kept;
   }
 
@@ -522,6 +529,14 @@ export function miniBoard(fen, { orientation, arrows = [], marks = {}, label, la
 export const uciArrow = (uci, kind) => (uci && uci.length >= 4 ? { from: uci.slice(0, 2), to: uci.slice(2, 4), kind } : null);
 export const uciMarks = (uci, kind) => (uci && uci.length >= 4 ? { [uci.slice(0, 2)]: kind, [uci.slice(2, 4)]: kind } : {});
 
+/** Keep a menu's panel on screen: when it would run off the right edge, it opens leftwards instead. */
+export function fitMenu(details) {
+  const panel = details.querySelector(".board-menu-panel");
+  if (!panel || !details.open) return;
+  panel.classList.remove("flip");
+  if (panel.getBoundingClientRect().right > document.documentElement.clientWidth - 8) panel.classList.add("flip");
+}
+
 /** The Board menu for a board's footer: colours, piece set, coordinates and move sounds, plus Flip.
  *  Choices are saved in this browser and apply to every board. */
 export function boardSettings(board) {
@@ -558,6 +573,7 @@ export function boardSettings(board) {
   menu.append(summary, panel);
   const close = (e) => { if (menu.open && (e.type === "keydown" ? e.key === "Escape" : !menu.contains(e.target))) { menu.open = false; if (e.type === "keydown") summary.focus(); } };
   menu.addEventListener("toggle", () => {
+    fitMenu(menu);
     if (menu.open) { document.addEventListener("pointerdown", close); document.addEventListener("keydown", close); }
     else { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", close); }
   });

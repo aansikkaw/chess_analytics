@@ -82,6 +82,18 @@ def test_search_index_for_the_command_palette(app_mod):
     assert other.get(f"/api/accounts/{a['id']}/search").status_code == 404  # someone else's account
 
 
+def test_session_check_never_errors_for_signed_out_visitors(app_mod):
+    anon = TestClient(app_mod.app)
+    r = anon.get("/api/session")
+    assert r.status_code == 200 and r.json() == {"signed_in": False}  # no 401 in the visitor's console
+    anon.cookies.set("pb_session", "not-a-real-token")
+    assert anon.get("/api/session").json() == {"signed_in": False}
+    c = client(app_mod, "session@test.com")
+    s = c.get("/api/session").json()
+    assert s["signed_in"] is True and s["me"] == c.get("/api/me").json()  # carries /api/me, saving a round trip
+    assert 'href="/static/js/shell.js"' not in anon.get("/").text  # the landing page never loads the signed-in app
+
+
 def test_passwords_are_hashed(app_mod):
     client(app_mod, "hash@test.com")
     u = app_mod.store.user_by_email("hash@test.com")

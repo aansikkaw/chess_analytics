@@ -29,6 +29,7 @@ import chess.engine
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -180,6 +181,11 @@ def _same_origin(origin: str, request: Request) -> bool:
     return o.netloc in hosts
 
 
+# Compress text responses (HTML, CSS, JS, JSON). Behind Caddy (encode zstd gzip) this is passed through untouched;
+# without it (Docker alone, Codespaces) pages would go out uncompressed.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
 @app.middleware("http")
 async def same_origin_writes(request: Request, call_next):
     """CSRF defence on top of SameSite cookies: a browser on another site can't make us change anything.
@@ -204,7 +210,7 @@ async def security_headers(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
-    elif path.startswith(("/static/fonts/", "/static/icons/")):
+    elif path.startswith(("/static/fonts/", "/static/icons/", "/static/pieces/")):
         resp.headers["Cache-Control"] = "public, max-age=604800"
     elif path.startswith("/static/"):
         # JS/CSS URLs aren't versioned, so browsers must check for a new copy (a cheap 304) after every deploy.
@@ -572,6 +578,19 @@ def reset_password(body: ResetBody, response: Response) -> dict:
     store.delete_sessions(uid)  # sign out everywhere else
     set_session(response, uid)
     return {"ok": True, "message": "Password changed. You're signed in."}
+
+
+def _session_user(request: Request) -> dict | None:
+    token = request.cookies.get(auth.SESSION_COOKIE)
+    return store.session_user(auth.token_hash(token)) if token else None
+
+
+@app.get("/api/session")
+def session_status(request: Request) -> dict:
+    """Signed in or not, as a plain answer: the app asks this first, so a signed-out visitor's console shows no 401.
+    Signed in, it carries what /api/me would, saving the app a round trip before its first screen."""
+    user = _session_user(request)
+    return {"signed_in": True, "me": me(with_sponsor(user))} if user else {"signed_in": False}
 
 
 @app.get("/api/me")

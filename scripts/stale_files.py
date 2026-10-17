@@ -104,6 +104,7 @@ app/static/js/landing.js
 app/static/js/palette.js
 app/static/js/main.js
 app/static/js/plans.js
+app/static/js/report-graph.js
 app/static/js/sheetcv.js
 app/static/js/shell.js
 app/static/js/status.js

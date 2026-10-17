@@ -2,32 +2,27 @@
 
 import { $, $$, PLATFORM, S, account, ago, api, applyViewMode, del, el, fill, isCoach, isPro, openDialog, patch, post, showErr, sleep, store, toast, track,
   upload, viewMode } from "./core.js";
-import * as diagnose from "./views/diagnose.js";
-import * as train from "./views/train.js";
-import * as prepare from "./views/prepare.js";
-import * as coach from "./views/coach.js";
-import * as students from "./views/students.js";
-import * as scan from "./views/scan.js";
-import * as report from "./views/report.js";
 import { renderPlans, bindCurrency } from "./plans.js";
 import { openSupport } from "./support.js";
 import "./keys.js"; // Ctrl/Cmd+K command palette, ? for every shortcut
 
+// Each page's code loads when you first go there, so opening one page doesn't parse all the others.
 const AREAS = {
-  diagnose: { title: "Diagnose", view: diagnose },
-  train: { title: "Train", view: train },
-  prepare: { title: "Prepare", view: prepare },
-  coach: { title: "Coach", view: coach },
-  students: { title: "Students", view: students },
-  scan: { title: "Scan a scoresheet", view: scan },
-  report: { title: "Game report", view: report },
-  plans: { title: "Plans", view: { render: renderPlansPage } },
+  diagnose: { title: "Diagnose", load: () => import("./views/diagnose.js") },
+  train: { title: "Train", load: () => import("./views/train.js") },
+  prepare: { title: "Prepare", load: () => import("./views/prepare.js") },
+  coach: { title: "Coach", load: () => import("./views/coach.js") },
+  students: { title: "Students", load: () => import("./views/students.js") },
+  scan: { title: "Scan a scoresheet", load: () => import("./views/scan.js") },
+  report: { title: "Game report", load: () => import("./views/report.js") },
+  plans: { title: "Plans", load: async () => ({ render: renderPlansPage }) },
 };
+let routeSeq = 0;
 let signOutCb = null;
 
-export async function startApp({ fresh = false } = {}, onSignOut) {
+export async function startApp({ fresh = false, me = null } = {}, onSignOut) {
   signOutCb = onSignOut || signOutCb;
-  S.me = await api("/api/me");
+  S.me = me || await api("/api/me");
   if (await joinPendingInvite()) S.me = await api("/api/me");
   applyViewMode();
   $("#landing").hidden = true;
@@ -91,7 +86,8 @@ export async function refreshMe() {
 }
 
 // ---------------- routing ----------------
-export function route() {
+export async function route() {
+  const seq = ++routeSeq;
   const [areaKey, sub] = (location.hash.replace(/^#\/?/, "") || "diagnose").split("/");
   const area = AREAS[areaKey] ? areaKey : "diagnose";
   for (const a of $$(".rail a[data-area]")) {
@@ -105,7 +101,11 @@ export function route() {
   const free = area === "plans" || area === "students" || area === "scan" || area === "report" || (area === "prepare" && (sub === "scout" || sub === "library"));
   if (!free && !acct) { renderOnboarding(main); return; }
   if (!free && !acct.games) { renderWaiting(main, acct); return; }
-  AREAS[area].view.render(main, sub);
+  let view;
+  try { view = await AREAS[area].load(); }
+  catch (e) { main.replaceChildren(el("p", { class: "err", text: "This page didn't load. Check your connection and try again." })); console.error(e); return; }
+  if (seq !== routeSeq) return; // you moved on while it loaded
+  view.render(main, sub);
   main.focus({ preventScroll: true });
 }
 window.addEventListener("hashchange", () => { if (!$("#app").hidden) { window.scrollTo(0, 0); route(); } });
