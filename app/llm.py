@@ -141,9 +141,26 @@ def openai_tool_specs(specs: list[dict]) -> list[dict]:
     ]
 
 
+_TOOL_FAILURE_MARKERS = ("tool call validation", "tool_use_failed", "failed to call a function",
+                         "output_parse_failed", "parsing failed", "failed_generation")
+
+
 def _is_tool_validation_error(r: httpx.Response) -> bool:
+    """The provider rejected what the model wrote: a call that broke the schema (Groq `tool_use_failed`) or output it
+    couldn't parse into a call at all (Groq `output_parse_failed`). Both are worth a retry, and may hold a usable answer."""
     text = r.text.lower()
-    return r.status_code == 400 and ("tool call validation" in text or "tool_use_failed" in text or "failed to call a function" in text)
+    return r.status_code == 400 and any(m in text for m in _TOOL_FAILURE_MARKERS)
+
+
+def provider_error(r: httpx.Response) -> LLMError:
+    """A readable error from a failed response: the provider's own message, not a slice of raw JSON."""
+    try:
+        err = r.json().get("error")
+        detail = err.get("message") if isinstance(err, dict) else err
+    except (ValueError, AttributeError):
+        detail = None
+    detail = " ".join(str(detail or r.text or r.reason_phrase).split())[:300]
+    return LLMError(f"The model provider returned an error ({r.status_code}): {detail}")
 
 
 def rate_limit_wait(r: httpx.Response) -> float | None:
@@ -223,10 +240,10 @@ def openai_chat(backend: Backend, messages: list[dict], tools: list[dict], http:
             err = r.json().get("error") or {}
         except ValueError:
             err = {}
-        raise ToolCallRejected("The model made an invalid tool call twice in a row. Try rephrasing, or use a larger model.",
+        raise ToolCallRejected("The model wrote an answer the provider couldn't read, twice in a row. Try rephrasing, or use a larger model.",
                                detail=str(err.get("message") or "")[:500], failed_generation=str(err.get("failed_generation") or "")[:6000])
     if r.status_code >= 400:
-        raise LLMError(f"The model provider returned an error ({r.status_code}): {r.text[:200]}")
+        raise provider_error(r)
     try:
         data = r.json()
         choice = data["choices"][0]
@@ -308,5 +325,5 @@ def _post_json(http: httpx.Client, url: str, headers: dict, body: dict) -> httpx
     if r.status_code == 429:
         raise LLMError("The provider's rate limit was hit. Try again in a minute.")
     if r.status_code >= 400:
-        raise LLMError(f"The model provider returned an error ({r.status_code}): {r.text[:200]}")
+        raise provider_error(r)
     return r

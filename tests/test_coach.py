@@ -240,7 +240,7 @@ def test_repeated_tool_validation_error_falls_back_cleanly(demo_games, demo_bund
     coach = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
                   http=httpx.Client(transport=httpx.MockTransport(lambda r: bad)))
     r = coach.chat("study plan?")
-    assert r.mode == "fallback" and "invalid tool call" in r.reply
+    assert r.mode == "fallback" and "couldn't read, twice" in r.reply
 
 
 
@@ -536,3 +536,43 @@ def test_reasoning_that_runs_out_of_tokens_is_retried_with_more_room(demo_games,
               http=httpx.Client(transport=httpx.MockTransport(handler))).chat("what costs me most?")
     assert r.mode == "agent" and r.answer["summary"] == "Converting wins is your biggest leak."
     assert seen[1] > seen[0]  # the retry had a bigger budget
+
+
+# ---- Groq "output_parse_failed": the model's output couldn't be parsed into a tool call ----------------
+def _parse_failed(failed_generation=""):
+    return httpx.Response(400, json={"error": {"message": "Parsing failed. The model generated output that could not be parsed. "
+                                                          "Please adjust your prompt. See 'failed_generation' for more details.",
+                                               "type": "invalid_request_error", "code": "output_parse_failed",
+                                               "failed_generation": failed_generation}})
+
+
+@needs_engine
+def test_parse_failure_is_retried_at_temperature_zero(demo_games, demo_bundle):
+    temps = []
+
+    def handler(request):
+        temps.append(json.loads(request.content)["temperature"])
+        return _parse_failed() if len(temps) == 1 else httpx.Response(200, json={"choices": [{"message": _final("Tactics first.")}]})
+
+    r = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
+              http=httpx.Client(transport=httpx.MockTransport(handler))).chat("where do I start?")
+    assert r.mode == "agent" and r.answer["summary"] == "Tactics first." and temps == [0.3, 0.0]
+
+
+@needs_engine
+def test_parse_failure_is_salvaged_from_failed_generation(demo_games, demo_bundle):
+    gen = '<function=final_answer>{"summary": "Your endgames cost you the most points."}</function>'
+    r = Coach("demo_player", CoachTools(demo_games, demo_bundle, None), Backend("openai", "m", "http://x/v1", "k"),
+              http=httpx.Client(transport=httpx.MockTransport(lambda req: _parse_failed(gen)))).chat("what costs me most?")
+    assert r.mode == "agent" and r.answer["summary"] == "Your endgames cost you the most points."
+
+
+def test_provider_error_message_is_readable():
+    from app.llm import LLMError, openai_chat
+
+    bad = httpx.Response(400, json={"error": {"message": "Model is decommissioned.", "type": "invalid_request_error", "code": "model_decommissioned"}})
+    try:
+        openai_chat(Backend("openai", "m", "http://x/v1", "k"), [], [], httpx.Client(transport=httpx.MockTransport(lambda r: bad)))
+        raise AssertionError("should raise")
+    except LLMError as exc:
+        assert str(exc) == "The model provider returned an error (400): Model is decommissioned."
